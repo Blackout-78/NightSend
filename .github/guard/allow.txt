@@ -1,0 +1,2 @@
+# Lines here let the security guard accept something on purpose.
+# Format:  <rule> <path>     rules: key, permission, code, unicode, binary
