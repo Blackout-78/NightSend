@@ -146,10 +146,17 @@ public class TransferService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Notification n = buildNote("Waiting for PC...");
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTE_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            startForeground(NOTE_ID, n);
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTE_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTE_ID, n);
+            }
+        } catch (Exception e) {
+            // Android refused to run it in the background; the app screen will start it again.
+            status = "Could not start in background: " + e.getMessage();
+            stopSelf();
+            return START_NOT_STICKY;
         }
         if (thread == null) {
             running = true;
@@ -213,20 +220,42 @@ public class TransferService extends Service {
     // ---------------------------------------------------------------- network
 
     void serverLoop() {
-        try {
-            server = new ServerSocket();
-            server.setReuseAddress(true);
-            server.bind(new InetSocketAddress(PORT));
-        } catch (IOException e) {
-            status = "Could not start: " + e.getMessage();
-            return;
-        }
-        status = "Waiting for PC...";
         while (running) {
-            Socket s;
-            try { s = server.accept(); } catch (IOException e) { if (!running) return; continue; }
-            handle(s);
+            // (Re)open the listening port. If it is busy, keep trying instead of giving up.
+            try {
+                server = new ServerSocket();
+                server.setReuseAddress(true);
+                server.bind(new InetSocketAddress(PORT));
+            } catch (IOException e) {
+                status = "Could not listen on port " + PORT + ": " + e.getMessage() + " (retrying)";
+                try { if (server != null) server.close(); } catch (IOException ignored) { }
+                pause(2000);
+                continue;
+            }
+            status = "Waiting for PC...";
+            while (running) {
+                Socket s;
+                try {
+                    s = server.accept();
+                } catch (IOException e) {
+                    if (!running) return;
+                    break; // listening socket broke: open a fresh one
+                }
+                try {
+                    handle(s);
+                } catch (Throwable t) {
+                    // never let one bad connection kill the receiver
+                    status = "Connection error: " + t;
+                    try { s.close(); } catch (IOException ignored) { }
+                }
+            }
+            try { server.close(); } catch (IOException ignored) { }
+            pause(500);
         }
+    }
+
+    static void pause(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException ignored) { }
     }
 
     /** Checks the PAIR line. Compares in constant time so the timing gives nothing away. */
@@ -272,7 +301,8 @@ public class TransferService extends Service {
         status = "PC connected";
         acquireLocks();
         try {
-            s.setSoTimeout(180000);
+            s.setSoTimeout(60000);   // a dead PC frees the phone after 60 s
+            s.setKeepAlive(true);
             byte[] buf = new byte[1 << 20];
             String line;
             while ((line = readLine(in)) != null) {

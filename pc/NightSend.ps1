@@ -1,4 +1,4 @@
-# NightSend PC (v0.5 - same Wi-Fi + pairing code + background/tray)
+# NightSend PC (v0.6 - same Wi-Fi + pairing code + background/tray + crash fixes)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -6,6 +6,16 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# Any unexpected error is written to %APPDATA%\NightSend\crash.log instead of silently closing the app.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode([System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+function Write-Crash([string]$m) {
+    try {
+        $d = Join-Path $env:APPDATA "NightSend"
+        [void](New-Item -ItemType Directory -Force -Path $d)
+        [IO.File]::AppendAllText((Join-Path $d "crash.log"), ((Get-Date -Format s) + "  " + $m + "`r`n"))
+    } catch {}
+}
+[System.Windows.Forms.Application]::add_ThreadException({ param($s, $e) Write-Crash ("UI error: " + $e.Exception.ToString()) })
 
 # Keeps Windows from sleeping while a transfer runs.
 try {
@@ -68,8 +78,8 @@ function Open-Conn([string]$ip) {
     Close-Conn
     $t = New-Object Net.Sockets.TcpClient
     $t.SendBufferSize = 1MB
-    $t.ReceiveTimeout = 180000
-    $t.SendTimeout = 180000
+    $t.ReceiveTimeout = 60000
+    $t.SendTimeout = 60000
     $ar = $t.BeginConnect($ip, $Port, $null, $null)
     if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { $t.Close(); throw "Phone did not answer at $ip" }
     $t.EndConnect($ar)
@@ -279,7 +289,7 @@ function Update-Progress {
     $speed = 0; if ($secs -gt 1) { $speed = $done / $secs }
     $eta = ""
     if ($speed -gt 0) {
-        $left = [TimeSpan]::FromSeconds(($script:TotalBytes - $done) / $speed)
+        $left = [TimeSpan]::FromSeconds([Math]::Min(359999, [Math]::Max(0, ($script:TotalBytes - $done) / $speed)))
         $eta = "  -  about {0}h {1}m left" -f [int][Math]::Floor($left.TotalHours), $left.Minutes
     }
     $lblStatus.Text = ("File {0} of {1}  -  {2} of {3}  -  {4}/s{5}" -f
@@ -396,12 +406,12 @@ $tray.Text = "NightSend"
 $tray.Visible = $true
 $menu = New-Object Windows.Forms.ContextMenuStrip
 [void]$menu.Items.Add("Open NightSend", $null, { Show-Window })
-[void]$menu.Items.Add("Exit", $null, { $script:Quit = $true; $form.Close() })
+[void]$menu.Items.Add("Exit", $null, { $script:Quit = $true; if ($script:Running) { Show-Window }; $form.Close() })
 $tray.ContextMenuStrip = $menu
 
-function Show-Window { $form.Show(); $form.WindowState = "Normal"; $form.ShowInTaskbar = $true; [void]$form.Activate() }
+function Show-Window { $form.Show(); $form.WindowState = "Normal"; [void]$form.Activate() }
 function Hide-Window {
-    $form.ShowInTaskbar = $false; $form.Hide()
+    $form.Hide()
     if ($script:Running) { $tray.BalloonTipTitle = "NightSend"; $tray.BalloonTipText = "Still sending in the background. Click the tray icon to open."; $tray.ShowBalloonTip(3000) }
 }
 function Tray-Note([string]$title, [string]$msg) {
@@ -427,4 +437,6 @@ $form.Add_Shown({ Log "NightSend ready. Put the phone and this PC on the same Wi
     if ($SavedCode.Length -eq 6) { Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false }
 })
 
-[void]$form.ShowDialog()
+# Application.Run (not ShowDialog): hiding the window to the tray must never end the program.
+try { [System.Windows.Forms.Application]::Run($form) } catch { Write-Crash ("Fatal: " + $_.Exception.ToString()) }
+try { $tray.Visible = $false; $tray.Dispose() } catch {}

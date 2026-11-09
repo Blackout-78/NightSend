@@ -46,6 +46,7 @@ jobs:
           files: NightSend.apk
 
   pc-exe:
+    needs: build   # one release at a time, so both files land on the same release
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -54,7 +55,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module ps2exe -Scope CurrentUser -Force
-          Invoke-ps2exe -inputFile pc/NightSend.ps1 -outputFile NightSend.exe -noConsole -STA -title "NightSend" -product "NightSend" -version "0.5.0.0"
+          Invoke-ps2exe -inputFile pc/NightSend.ps1 -outputFile NightSend.exe -noConsole -STA -title "NightSend" -product "NightSend" -version "0.6.0.0"
           if (-not (Test-Path NightSend.exe)) { throw "exe not built" }
 
       - name: Publish release
