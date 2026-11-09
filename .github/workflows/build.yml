@@ -54,7 +54,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module ps2exe -Scope CurrentUser -Force
-          Invoke-ps2exe -inputFile pc/NightSend.ps1 -outputFile NightSend.exe -noConsole -STA -title "NightSend" -product "NightSend" -version "0.3.0.0"
+          Invoke-ps2exe -inputFile pc/NightSend.ps1 -outputFile NightSend.exe -noConsole -STA -title "NightSend" -product "NightSend" -version "0.4.0.0"
           if (-not (Test-Path NightSend.exe)) { throw "exe not built" }
 
       - name: Publish release

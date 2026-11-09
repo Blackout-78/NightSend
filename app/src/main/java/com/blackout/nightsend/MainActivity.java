@@ -56,8 +56,8 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * NightSend receiver. Listens on port 47800 for the NightSend PC app over
- * USB tethering or the PC hotspot. No internet, no cloud.
+ * NightSend receiver. Listens on port 47800 for the NightSend PC app on the
+ * same Wi-Fi (the PC finds the phone by itself). No internet, no cloud.
  *
  * Protocol (one line commands, UTF-8, ending in \n):
  *   PAIR code        -> OK, or ERR code (must be the first line; nothing else is answered before it)
@@ -124,7 +124,7 @@ public class MainActivity extends Activity {
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setLetterSpacing(0.12f);
         root.addView(title);
-        root.addView(text("Direct transfer  -  no cloud, no internet", 14, DIM));
+        root.addView(text("Same Wi-Fi  -  just type the code  -  no cloud", 14, DIM));
 
         View line = new View(this);
         line.setBackgroundColor(ACCENT);
@@ -149,7 +149,7 @@ public class MainActivity extends Activity {
         newCodeBtn.setOnClickListener(v -> { newCode(); status = "New code made. Type it into the PC app."; });
         root.addView(newCodeBtn);
 
-        root.addView(header("PHONE ADDRESS (for the PC app)"));
+        root.addView(header("PHONE ADDRESS (the PC finds it by itself)"));
         addrView = text("", 16, TEXT);
         addrView.setTypeface(Typeface.MONOSPACE);
         root.addView(addrView);
@@ -187,9 +187,9 @@ public class MainActivity extends Activity {
 
         root.addView(header("HOW TO CONNECT"));
         root.addView(text(
-                "USB: plug in the cable, then turn on USB tethering in the phone's hotspot settings.\n" +
-                "Wireless: join the PC's hotspot Wi-Fi.\n" +
-                "Then press Find phone in NightSend on the PC. Keep this screen open while sending.", 14, DIM));
+                "1. Join the same Wi-Fi as the PC.\n" +
+                "2. Open NightSend on the PC and type the code above.\n" +
+                "Keep this screen open while sending.", 14, DIM));
 
         ScrollView sv = new ScrollView(this);
         sv.setBackgroundColor(BG);
@@ -369,7 +369,7 @@ public class MainActivity extends Activity {
                 }
             }
         } catch (Exception ignored) { }
-        return sb.length() == 0 ? "No connection yet - turn on USB tethering or join the PC hotspot." : sb.toString();
+        return sb.length() == 0 ? "No connection yet - join the same Wi-Fi as the PC." : sb.toString();
     }
 
     void serverLoop() {

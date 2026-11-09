@@ -1,7 +1,7 @@
 # NightSend
 
 Private direct file transfer from a Windows PC to an Android phone.
-USB tethering (cable) or the PC's own hotspot. No internet, no cloud, no relay.
+Both on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no relay.
 
 - `app/` - Android receiver app (APK built automatically by GitHub Actions, see Releases)
 - PC sender: `NightSend.exe` (see Releases), or `pc/NightSend.bat` + `pc/NightSend.ps1` (Windows 10/11, nothing to install)

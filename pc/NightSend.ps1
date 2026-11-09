@@ -1,6 +1,6 @@
-# NightSend PC (v0.3 - pairing code)
+# NightSend PC (v0.4 - same Wi-Fi + pairing code)
 # Sends a whole folder from this PC to the NightSend phone app.
-# Works over USB tethering (cable) or the PC's own hotspot. No internet, no cloud, no extra downloads.
+# Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -139,7 +139,7 @@ function Connect-Phone {
     $ip = $txtIp.Text.Trim()
     if (-not $ip) { $ip = Find-PhoneIp }
     if (-not $ip) {
-        $lblPhone.Text = "Phone not found. Open NightSend on the phone and turn on USB tethering (or join the PC hotspot)."
+        $lblPhone.Text = "Phone not found. Open NightSend on the phone and make sure the phone and this PC are on the same Wi-Fi."
         $lblPhone.ForeColor = $cAccent
         return $false
     }
@@ -329,13 +329,13 @@ function T($text, $x, $y, $w) {
 }
 
 [void](L "NIGHTSEND" 20 14 400 44 (New-Object Drawing.Font("Segoe UI Black", 24)) $cText)
-[void](L "Direct transfer  -  USB tethering or PC hotspot  -  no cloud, no internet" 22 58 660 22 $null $cDim)
+[void](L "Same Wi-Fi  -  just type the code  -  no cloud, no internet" 22 58 660 22 $null $cDim)
 $line = New-Object Windows.Forms.Panel; $line.BackColor = $cAccent
 $line.Location = New-Object Drawing.Point(20, 86); $line.Size = New-Object Drawing.Size(680, 2); $form.Controls.Add($line)
 
 [void](L "1  PHONE" 20 102 200 22 $fBold $cDim)
 $btnFind = B "Find phone" 20 126 150
-[void](L "Address:" 182 132 64 22 $null $cDim)
+[void](L "Address (auto):" 182 132 64 22 $null $cDim)
 $txtIp = T "" 248 129 150
 [void](L "Code:" 410 132 44 22 $null $cDim)
 $txtCode = T $SavedCode 456 129 90
@@ -384,6 +384,8 @@ $form.Add_FormClosing({
         Abort-Send "Closed."
     }
 })
-$form.Add_Shown({ Log "NightSend ready. Open NightSend on the phone, turn on USB tethering, type the pairing code from the phone, then press Find phone." })
+$form.Add_Shown({ Log "NightSend ready. Put the phone and this PC on the same Wi-Fi, open NightSend on the phone and type its pairing code here."
+    if ($SavedCode.Length -eq 6) { Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false }
+})
 
 [void]$form.ShowDialog()
