@@ -320,7 +320,7 @@ public class TransferService extends Service {
         status = "PC connected";
         acquireLocks();
         try {
-            s.setSoTimeout(60000);   // a dead PC frees the phone after 60 s
+            s.setSoTimeout(15 * 60 * 1000);   // PC may sit in the folder picker for a while; a dead PC frees the phone after 15 min
             s.setKeepAlive(true);
             byte[] buf = new byte[1 << 20];
             File sessionDest = null;   // set by DEST; lasts for this connection only
@@ -348,7 +348,7 @@ public class TransferService extends Service {
                     File d = new File(p);
                     if (!allowed(p)) send(out, "ERR not allowed");
                     else if (!d.isDirectory() && !d.mkdirs()) send(out, "ERR cannot create folder");
-                    else { sessionDest = d; send(out, "OK|" + freeBytes(d)); }
+                    else { sessionDest = d; status = "PC connected\nSaving into: " + p; send(out, "OK|" + freeBytes(d)); }
                 } else if (line.startsWith("MKDIR ")) {
                     String p = line.substring(6).trim();
                     File d = new File(p);

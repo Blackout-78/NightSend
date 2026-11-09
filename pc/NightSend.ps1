@@ -1,4 +1,4 @@
-# NightSend PC (v0.8 - same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder)
+# NightSend PC (v0.9 - same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -429,9 +429,12 @@ function Pick-PhoneFolder {
 
         $refresh = {
             try {
+                # The phone may have dropped the idle connection while the window was open: reconnect once.
+                if (-not $script:Tcp -or -not $script:Tcp.Connected) { if (-not (Connect-Phone)) { throw "phone not reachable" } }
                 $names = Get-PhoneDirs $script:DlgPath
                 $list.Items.Clear(); foreach ($n in $names) { [void]$list.Items.Add($n) }
                 $lblP.Text = $script:DlgPath; $lblP.ForeColor = $cDim
+                if ($list.Items.Count -eq 0) { [void]$list.Items.Add("(no folders here - press Use this folder, or New folder)") }
             } catch {
                 $lblP.Text = "Could not read that folder: " + $_.Exception.Message + "   (If it says unknown command, update the phone app.)"
                 $lblP.ForeColor = $cAccent
@@ -439,7 +442,7 @@ function Pick-PhoneFolder {
         }
         $open = {
             $n = $list.SelectedItem
-            if ($n) { $script:DlgPath = $script:DlgPath.TrimEnd("/") + "/" + $n; & $refresh }
+            if ($n -and -not $n.StartsWith("(no folders")) { $script:DlgPath = $script:DlgPath.TrimEnd("/") + "/" + $n; & $refresh }
         }
         $bUp.Add_Click({
             $p = $script:DlgPath.TrimEnd("/")
