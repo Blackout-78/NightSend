@@ -1,4 +1,4 @@
-# NightSend PC (v0.9 - same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder)
+# NightSend PC (v1.0 - same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder + no freezing + auto-reconnect)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -41,6 +41,8 @@ $script:Failed = New-Object System.Collections.ArrayList
 $script:Index = 0; $script:Fs = $null; $script:Left = [int64]0
 $script:TotalBytes = [int64]0; $script:DoneBytes = [int64]0; $script:CurBytes = [int64]0
 $script:StartTime = $null; $script:Running = $false
+$script:Pend = $null; $script:PendN = 0; $script:AwaitOk = $false; $script:OkSince = $null
+$script:Retries = 0; $script:RetryAt = $null; $script:LastProgress = Get-Date
 $script:Buf = New-Object byte[] (1MB)
 
 # ---------- colours ----------
@@ -78,8 +80,8 @@ function Open-Conn([string]$ip) {
     Close-Conn
     $t = New-Object Net.Sockets.TcpClient
     $t.SendBufferSize = 1MB
-    $t.ReceiveTimeout = 60000
-    $t.SendTimeout = 60000
+    $t.ReceiveTimeout = 30000
+    $t.SendTimeout = 30000
     $ar = $t.BeginConnect($ip, $Port, $null, $null)
     if (-not $ar.AsyncWaitHandle.WaitOne(3000)) { $t.Close(); throw "Phone did not answer at $ip" }
     $t.EndConnect($ar)
@@ -270,6 +272,7 @@ function Start-Send {
     }
 
     $script:Index = 0; $script:DoneBytes = 0; $script:CurBytes = 0
+    $script:Pend = $null; $script:AwaitOk = $false; $script:Retries = 0; $script:RetryAt = $null; $script:LastProgress = Get-Date
     $script:StartTime = Get-Date; $script:Running = $true
     Keep-Awake $true
     Start-Next
@@ -284,10 +287,11 @@ function Start-Next {
             $lblFile.Text = $item.Rel
             Send-Line ("PUT {0} {1}" -f $item.Size, $item.Rel)
             $script:Left = $item.Size; $script:CurBytes = 0
+            $script:LastProgress = Get-Date
             return
         } catch {
-            if ($script:Fs) { $script:Fs.Close(); $script:Fs = $null }
-            if (-not $script:Tcp -or -not $script:Tcp.Connected) { Abort-Send ("Connection lost: " + $_.Exception.Message); return }
+            if ($script:Fs) { try { $script:Fs.Close() } catch {}; $script:Fs = $null }
+            if (-not $script:Tcp -or -not $script:Tcp.Connected) { Lost $_.Exception.Message; return }
             [void]$script:Failed.Add($item.Rel); Log ("SKIPPED (cannot read on PC): " + $item.Rel)
             $script:DoneBytes += $item.Size; $script:Index++
         }
@@ -295,31 +299,88 @@ function Start-Next {
     Finish-Send
 }
 
+# The connection dropped or stalled: reconnect and carry on with the same file (up to 3 times in a row).
+function Lost([string]$why) {
+    $script:Pend = $null; $script:AwaitOk = $false
+    if ($script:Fs) { try { $script:Fs.Close() } catch {}; $script:Fs = $null }
+    $script:CurBytes = 0
+    Write-Crash ("Connection lost: " + $why)
+    if ($script:Retries -ge 3) { Abort-Send ("Connection lost: " + $why + " (gave up after 3 tries)."); return }
+    $script:Retries++
+    Log ("Connection lost: {0}. Reconnecting ({1} of 3)..." -f $why, $script:Retries)
+    $lblStatus.Text = "Connection lost - reconnecting..."
+    Close-Conn
+    $script:RetryAt = (Get-Date).AddSeconds(3)
+}
+
+function Resume-Send {
+    try {
+        Open-Conn $script:PhoneIp
+        [void](Say-Hello)
+        if ($script:DestPath) {
+            Send-Line ("DEST " + $script:DestPath)
+            $r = $script:Rd.ReadLine()
+            if (-not $r -or -not $r.StartsWith("OK")) { throw "phone refused the folder" }
+        }
+    } catch { Lost $_.Exception.Message; return }
+    Log "Reconnected. Continuing."
+    Start-Next
+}
+
+# Never blocks the window: writes are asynchronous and each tick returns quickly.
 function On-Tick {
-    if (-not $script:Running -or -not $script:Fs) { return }
+    if (-not $script:Running) { return }
+    if ($script:RetryAt) {
+        if ((Get-Date) -lt $script:RetryAt) { return }
+        $script:RetryAt = $null
+        Resume-Send
+        return
+    }
+    if (-not $script:Fs -and -not $script:AwaitOk) { return }
     $item = $script:Queue[$script:Index]
     try {
         $sw = [Diagnostics.Stopwatch]::StartNew()
-        while ($script:Left -gt 0 -and $sw.ElapsedMilliseconds -lt 300) {
+        while ($sw.ElapsedMilliseconds -lt 100) {
+            if ($script:Pend) {
+                if (-not $script:Pend.IsCompleted) {
+                    if (((Get-Date) - $script:LastProgress).TotalSeconds -gt 20) { throw "no progress for 20 seconds" }
+                    break
+                }
+                $script:Ns.EndWrite($script:Pend); $script:Pend = $null
+                $script:Left -= $script:PendN; $script:CurBytes += $script:PendN
+                $script:LastProgress = Get-Date
+                continue
+            }
+            if ($script:AwaitOk) {
+                if ($script:Ns.DataAvailable) {
+                    $resp = $script:Rd.ReadLine()
+                    $script:AwaitOk = $false
+                    if ($resp -eq $null -or $resp.StartsWith("ERR !")) { Lost "phone stopped answering"; return }
+                    if ($resp -ne "OK") { [void]$script:Failed.Add($item.Rel); Log ("FAILED on phone: {0}  ({1})" -f $item.Rel, $resp) }
+                    $script:DoneBytes += $item.Size; $script:CurBytes = 0; $script:Index++
+                    $script:Retries = 0; $script:LastProgress = Get-Date
+                    Update-Progress
+                    Start-Next
+                    return
+                }
+                if (((Get-Date) - $script:OkSince).TotalSeconds -gt 120) { throw "phone did not confirm the file" }
+                break
+            }
+            if ($script:Left -le 0) {
+                $script:Fs.Close(); $script:Fs = $null
+                $script:AwaitOk = $true; $script:OkSince = Get-Date
+                continue
+            }
             $want = [int][Math]::Min([int64]$script:Buf.Length, [int64]$script:Left)
             $n = $script:Fs.Read($script:Buf, 0, $want)
             if ($n -le 0) { throw "File got shorter while sending: $($item.Rel)" }
-            $script:Ns.Write($script:Buf, 0, $n)
-            $script:Left -= $n; $script:CurBytes += $n
-        }
-        if ($script:Left -eq 0) {
-            $script:Fs.Close(); $script:Fs = $null
-            $resp = $script:Rd.ReadLine()
-            if ($resp -ne "OK") { [void]$script:Failed.Add($item.Rel); Log ("FAILED on phone: {0}  ({1})" -f $item.Rel, $resp) }
-            if ($resp -eq $null -or $resp.StartsWith("ERR !")) { Abort-Send "Phone stopped answering."; return }
-            $script:DoneBytes += $item.Size; $script:CurBytes = 0; $script:Index++
-            Update-Progress
-            Start-Next
-            return
+            $script:PendN = $n
+            $script:Pend = $script:Ns.BeginWrite($script:Buf, 0, $n, $null, $null)
+            [void]$script:Pend.AsyncWaitHandle.WaitOne(40)
         }
         Update-Progress
     } catch {
-        Abort-Send ("Connection lost: " + $_.Exception.Message)
+        Lost $_.Exception.Message
     }
 }
 
@@ -355,6 +416,7 @@ function Finish-Send {
 
 function Abort-Send([string]$why) {
     $timer.Stop(); $script:Running = $false; Keep-Awake $false
+    $script:Pend = $null; $script:AwaitOk = $false; $script:RetryAt = $null
     if ($script:Fs) { try { $script:Fs.Close() } catch {}; $script:Fs = $null }
     Close-Conn
     $lblStatus.Text = "Stopped. Press SEND to continue where it left off."
