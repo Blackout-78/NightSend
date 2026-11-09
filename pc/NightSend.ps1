@@ -240,7 +240,7 @@ function On-Tick {
     try {
         $sw = [Diagnostics.Stopwatch]::StartNew()
         while ($script:Left -gt 0 -and $sw.ElapsedMilliseconds -lt 300) {
-            $want = [int][Math]::Min($script:Buf.Length, $script:Left)
+            $want = [int][Math]::Min([int64]$script:Buf.Length, [int64]$script:Left)
             $n = $script:Fs.Read($script:Buf, 0, $want)
             if ($n -le 0) { throw "File got shorter while sending: $($item.Rel)" }
             $script:Ns.Write($script:Buf, 0, $n)
