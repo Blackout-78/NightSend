@@ -1,4 +1,4 @@
-# NightSend PC (v0.2)
+# NightSend PC (v0.3 - pairing code)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Works over USB tethering (cable) or the PC's own hotspot. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -8,6 +8,12 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
 $Port = 47800
+# The phone's pairing code is remembered here after it works once.
+$CodeDir = Join-Path $env:APPDATA "NightSend"
+$CodeFile = Join-Path $CodeDir "pairing-code.txt"
+try { [void](New-Item -ItemType Directory -Force -Path $CodeDir) } catch {}
+$SavedCode = ""
+try { if (Test-Path -LiteralPath $CodeFile) { $SavedCode = ([IO.File]::ReadAllText($CodeFile)).Trim() } } catch {}
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Tcp = $null; $script:Ns = $null; $script:Rd = $null
 $script:PhoneIp = $null; $script:PhoneFree = -1
@@ -64,6 +70,12 @@ function Open-Conn([string]$ip) {
 }
 
 function Say-Hello {
+    $code = ($txtCode.Text -replace "\D", "")
+    if ($code.Length -ne 6) { throw "Type the 6-digit pairing code shown on the phone." }
+    Send-Line ("PAIR " + $code)
+    $ok = $script:Rd.ReadLine()
+    if ($ok -ne "OK") { throw "Wrong pairing code. Check the code on the phone screen and type it again." }
+    try { [IO.File]::WriteAllText($CodeFile, $code) } catch {}
     Send-Line "HELLO"
     $r = $script:Rd.ReadLine()
     if (-not $r -or -not $r.StartsWith("NIGHTSEND|")) { throw "Not a NightSend phone." }
@@ -325,7 +337,10 @@ $line.Location = New-Object Drawing.Point(20, 86); $line.Size = New-Object Drawi
 $btnFind = B "Find phone" 20 126 150
 [void](L "Address:" 182 132 64 22 $null $cDim)
 $txtIp = T "" 248 129 150
-[void](L "(blank = find it for me)" 406 132 280 22 $null $cDim)
+[void](L "Code:" 410 132 44 22 $null $cDim)
+$txtCode = T $SavedCode 456 129 90
+$txtCode.MaxLength = 7
+[void](L "(from phone)" 552 132 150 22 $null $cDim)
 $lblPhone = L "Not connected." 20 164 680 40 $null $cDim
 
 [void](L "2  SEND FROM (this PC)" 20 210 300 22 $fBold $cDim)
@@ -369,6 +384,6 @@ $form.Add_FormClosing({
         Abort-Send "Closed."
     }
 })
-$form.Add_Shown({ Log "NightSend ready. Open NightSend on the phone, turn on USB tethering, then press Find phone." })
+$form.Add_Shown({ Log "NightSend ready. Open NightSend on the phone, turn on USB tethering, type the pairing code from the phone, then press Find phone." })
 
 [void]$form.ShowDialog()

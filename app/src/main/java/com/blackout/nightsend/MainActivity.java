@@ -48,6 +48,8 @@ import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -58,6 +60,7 @@ import java.util.Locale;
  * USB tethering or the PC hotspot. No internet, no cloud.
  *
  * Protocol (one line commands, UTF-8, ending in \n):
+ *   PAIR code        -> OK, or ERR code (must be the first line; nothing else is answered before it)
  *   HELLO            -> NIGHTSEND|model|freeBytes|destPath|storageOk(1/0)
  *   LIST             -> size|relativePath lines, then END
  *   PUT size relPath -> (then exactly size bytes) -> OK or ERR reason
@@ -66,6 +69,8 @@ import java.util.Locale;
 public class MainActivity extends Activity {
 
     static final int PORT = 47800;
+    static final int MAX_WRONG = 5;        // wrong codes in a row before a new code is made
+    static final int MAX_LINE = 8192;      // longest command line accepted
     static final int BG = Color.rgb(10, 10, 12);
     static final int PANEL = Color.rgb(28, 28, 32);
     static final int TEXT = Color.rgb(220, 220, 225);
@@ -77,7 +82,10 @@ public class MainActivity extends Activity {
     final List<File> volumes = new ArrayList<>();
     final List<String> volumeNames = new ArrayList<>();
 
-    TextView statusView, addrView, progressView, storageView;
+    TextView statusView, addrView, progressView, storageView, codeView;
+    volatile String pairCode;
+    volatile int wrongTries = 0;
+    final SecureRandom rng = new SecureRandom();
     Button grantButton;
     Spinner volSpinner;
     EditText folderEdit;
@@ -129,6 +137,17 @@ public class MainActivity extends Activity {
         root.addView(statusView);
         progressView = text("", 15, DIM);
         root.addView(progressView);
+
+        pairCode = prefs.getString("code", null);
+        if (pairCode == null) newCode();
+        root.addView(header("PAIRING CODE (type this into the PC app)"));
+        codeView = text("", 34, TEXT);
+        codeView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
+        codeView.setLetterSpacing(0.15f);
+        root.addView(codeView);
+        TextView newCodeBtn = text("Tap here to make a new code", 13, ACCENT);
+        newCodeBtn.setOnClickListener(v -> { newCode(); status = "New code made. Type it into the PC app."; });
+        root.addView(newCodeBtn);
 
         root.addView(header("PHONE ADDRESS (for the PC app)"));
         addrView = text("", 16, TEXT);
@@ -235,6 +254,8 @@ public class MainActivity extends Activity {
                 progressView.setText("");
             }
             addrView.setText(addresses());
+            String c = pairCode;
+            codeView.setText(c.substring(0, 3) + " " + c.substring(3));
             ui.postDelayed(this, 700);
         }
     };
@@ -368,15 +389,56 @@ public class MainActivity extends Activity {
         }
     }
 
+    void newCode() {
+        pairCode = String.format(Locale.US, "%06d", rng.nextInt(1000000));
+        wrongTries = 0;
+        prefs.edit().putString("code", pairCode).apply();
+    }
+
+    /** Checks the PAIR line. Compares in constant time so the timing gives nothing away. */
+    boolean codeMatches(String line) {
+        if (line == null || !line.startsWith("PAIR ")) return false;
+        byte[] a = line.substring(5).trim().getBytes(StandardCharsets.UTF_8);
+        byte[] b = pairCode.getBytes(StandardCharsets.UTF_8);
+        return MessageDigest.isEqual(a, b);
+    }
+
     void handle(Socket s) {
+        try {
+            // Nothing is answered or shown until the right code arrives.
+            s.setSoTimeout(10000);
+            InputStream in = new BufferedInputStream(s.getInputStream(), 1 << 20);
+            OutputStream out = s.getOutputStream();
+            String first = readLine(in);
+            if (!codeMatches(first)) {
+                if (first == null) return; // a plain "is anyone there?" knock from Find phone
+                wrongTries++;
+                if (wrongTries >= MAX_WRONG) {
+                    newCode();
+                    status = "Wrong code tried " + MAX_WRONG + " times. A new code was made.";
+                } else {
+                    status = "Wrong pairing code from " + s.getInetAddress().getHostAddress() + ". Blocked.";
+                }
+                Thread.sleep(1000); // slows down guessing
+                send(out, "ERR code");
+                return;
+            }
+            wrongTries = 0;
+            send(out, "OK");
+            session(s, in, out);
+        } catch (Exception e) {
+            // ignore: a bad or dropped connection before pairing
+        } finally {
+            try { s.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    void session(Socket s, InputStream in, OutputStream out) {
         connected = true;
         status = "PC connected";
         acquireLocks();
         try {
             s.setSoTimeout(180000);
-            s.setReceiveBufferSize(1 << 20);
-            InputStream in = new BufferedInputStream(s.getInputStream(), 1 << 20);
-            OutputStream out = s.getOutputStream();
             byte[] buf = new byte[1 << 20];
             String line;
             while ((line = readLine(in)) != null) {
@@ -407,7 +469,6 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             status = "Connection lost: " + e.getMessage();
         } finally {
-            try { s.close(); } catch (IOException ignored) { }
             connected = false;
             curSize = 0; currentFile = "";
             releaseLocks();
@@ -492,6 +553,7 @@ public class MainActivity extends Activity {
         while ((c = in.read()) != -1) {
             if (c == '\n') break;
             if (c != '\r') b.write(c);
+            if (b.size() > MAX_LINE) throw new IOException("line too long");
         }
         if (c == -1 && b.size() == 0) return null;
         return new String(b.toByteArray(), StandardCharsets.UTF_8);
