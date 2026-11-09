@@ -43,7 +43,7 @@ CODE_PATTERNS = [
 ]
 CODE_EXT = {".kt", ".java", ".py", ".ps1", ".bat", ".kts", ".gradle", ".yml", ".yaml"}
 TEXT_EXT = CODE_EXT | {".xml", ".md", ".txt", ".json", ".toml", ".properties"}
-BIDI = re.compile("[‪-‮⁦-⁩]")
+BIDI = re.compile("[" + "".join(chr(c) for c in (0x202A, 0x202B, 0x202C, 0x202D, 0x202E, 0x2066, 0x2067, 0x2068, 0x2069)) + "]")
 
 
 def load_allow():
