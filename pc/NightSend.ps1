@@ -1,4 +1,4 @@
-# NightSend PC (v0.6 - same Wi-Fi + pairing code + background/tray + crash fixes)
+# NightSend PC (v0.7 - same Wi-Fi + pairing code + background/tray + keeps folders / auto-sort)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -35,7 +35,7 @@ $SavedCode = ""
 try { if (Test-Path -LiteralPath $CodeFile) { $SavedCode = ([IO.File]::ReadAllText($CodeFile)).Trim() } } catch {}
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Tcp = $null; $script:Ns = $null; $script:Rd = $null
-$script:PhoneIp = $null; $script:PhoneFree = -1
+$script:PhoneIp = $null; $script:PhoneFree = -1; $script:PhonePath = ""
 $script:Queue = New-Object System.Collections.ArrayList
 $script:Failed = New-Object System.Collections.ArrayList
 $script:Index = 0; $script:Fs = $null; $script:Left = [int64]0
@@ -149,6 +149,7 @@ function Find-PhoneIp {
 function Set-Busy([bool]$busy) {
     $btnSend.Enabled = -not $busy; $btnFind.Enabled = -not $busy
     $btnBrowse.Enabled = -not $busy; $btnStop.Enabled = $busy
+    $chkRoot.Enabled = -not $busy; $chkSort.Enabled = -not $busy
 }
 
 # ---------- connect ----------
@@ -166,6 +167,7 @@ function Connect-Phone {
         Open-Conn $ip
         $h = Say-Hello
         $script:PhoneIp = $ip
+        $script:PhonePath = $h.Path
         $txtIp.Text = $ip
         $lblPhone.Text = "Connected: {0}  -  {1} free  -  saving to {2}" -f $h.Model, (Fmt $h.Free), $h.Path
         $lblPhone.ForeColor = $cGood
@@ -185,6 +187,20 @@ function Connect-Phone {
     }
 }
 
+# ---------- folder layout ----------
+function Clean-Name([string]$n) { ($n -replace '[<>:"|?*]', '').Trim() }
+
+# "Show.Name.S02E05.mkv" -> "Show Name/Season 2/Show.Name.S02E05.mkv"; anything else is left alone.
+function Sort-Name([string]$name) {
+    $m = [regex]::Match($name, '^(.+?)[ ._-]+[Ss](\d{1,2})[ ._-]?[Ee]\d{1,3}')
+    if (-not $m.Success) { $m = [regex]::Match($name, '^(.+?)[ ._-]+(\d{1,2})x\d{1,3}') }
+    if ($m.Success) {
+        $show = Clean-Name ($m.Groups[1].Value -replace '[._]', ' ')
+        if ($show) { return ("{0}/Season {1}/{2}" -f $show, [int]$m.Groups[2].Value, $name) }
+    }
+    return $name
+}
+
 # ---------- send ----------
 function Start-Send {
     $src = $txtSrc.Text.Trim().TrimEnd("\")
@@ -193,6 +209,13 @@ function Start-Send {
     if (-not (Connect-Phone)) { Set-Busy $false; return }
 
     $lblStatus.Text = "Reading files on the PC..."; [Windows.Forms.Application]::DoEvents()
+    # Keep the chosen folder's own name (e.g. the show folder) unless the phone already saves into a folder of that name.
+    $rootName = ""
+    if ($chkRoot.Checked) {
+        $leaf = Clean-Name (Split-Path $src -Leaf)
+        $phoneLeaf = ($script:PhonePath -split "[/\\]")[-1]
+        if ($leaf -and -not $leaf.EndsWith(":") -and $leaf -ne $phoneLeaf) { $rootName = $leaf }
+    }
     $local = @(Get-ChildItem -LiteralPath $src -Recurse -File -Force -ErrorAction SilentlyContinue)
 
     $lblStatus.Text = "Reading what is already on the phone..."; [Windows.Forms.Application]::DoEvents()
@@ -211,6 +234,8 @@ function Start-Send {
     $script:TotalBytes = 0; $skipped = 0
     foreach ($f in $local) {
         $rel = $f.FullName.Substring($src.Length).TrimStart("\").Replace("\", "/")
+        if ($chkSort.Checked -and $rel -notlike "*/*") { $rel = Sort-Name $rel }
+        if ($rootName) { $rel = $rootName + "/" + $rel }
         if ($have.ContainsKey($rel) -and $have[$rel] -eq $f.Length) { $skipped++; continue }
         [void]$script:Queue.Add(@{ Local = $f.FullName; Rel = $rel; Size = [int64]$f.Length })
         $script:TotalBytes += $f.Length
@@ -368,7 +393,14 @@ $lblPhone = L "Not connected." 20 164 680 40 $null $cDim
 [void](L "2  SEND FROM (this PC)" 20 210 300 22 $fBold $cDim)
 $txtSrc = T "D:\BnM\TV & Movie\TV" 20 234 560
 $btnBrowse = B "Browse" 590 231 110
-[void](L "Where it goes on the phone is set in the phone app." 20 266 680 22 $null $cDim)
+$chkRoot = New-Object Windows.Forms.CheckBox
+$chkRoot.Text = "Keep the folder name"; $chkRoot.Checked = $true
+$chkRoot.Location = New-Object Drawing.Point(20, 264); $chkRoot.Size = New-Object Drawing.Size(190, 26); $chkRoot.ForeColor = $cText
+$form.Controls.Add($chkRoot)
+$chkSort = New-Object Windows.Forms.CheckBox
+$chkSort.Text = "Auto-sort loose files by name (Show / Season)"; $chkSort.Checked = $true
+$chkSort.Location = New-Object Drawing.Point(220, 264); $chkSort.Size = New-Object Drawing.Size(480, 26); $chkSort.ForeColor = $cText
+$form.Controls.Add($chkSort)
 
 $btnSend = B "SEND" 20 300 150
 $btnSend.BackColor = $cAccent; $btnSend.Font = $fBold
