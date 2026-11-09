@@ -1,4 +1,4 @@
-# NightSend PC (v0.4 - same Wi-Fi + pairing code)
+# NightSend PC (v0.5 - same Wi-Fi + pairing code + background/tray)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -6,6 +6,15 @@
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
+
+# Keeps Windows from sleeping while a transfer runs.
+try {
+    Add-Type -Namespace NS -Name Power -MemberDefinition '[System.Runtime.InteropServices.DllImport("kernel32.dll")] public static extern uint SetThreadExecutionState(uint f);'
+} catch {}
+function Keep-Awake([bool]$on) {
+    try { if ($on) { [void][NS.Power]::SetThreadExecutionState([uint32]2147483649) } else { [void][NS.Power]::SetThreadExecutionState([uint32]2147483648) } } catch {}
+}
+$script:Quit = $false
 
 $Port = 47800
 # The phone's pairing code is remembered here after it works once.
@@ -211,6 +220,7 @@ function Start-Send {
 
     $script:Index = 0; $script:DoneBytes = 0; $script:CurBytes = 0
     $script:StartTime = Get-Date; $script:Running = $true
+    Keep-Awake $true
     Start-Next
     $timer.Start()
 }
@@ -278,7 +288,7 @@ function Update-Progress {
 }
 
 function Finish-Send {
-    $timer.Stop(); $script:Running = $false
+    $timer.Stop(); $script:Running = $false; Keep-Awake $false
     Close-Conn
     $bar.Value = 1000; $lblFile.Text = ""
     if ($script:Failed.Count -eq 0) {
@@ -289,15 +299,17 @@ function Finish-Send {
         Log "Finished. $($script:Failed.Count) file(s) failed - press SEND again to retry only those."
     }
     Set-Busy $false
+    Tray-Note "NightSend" $lblStatus.Text
 }
 
 function Abort-Send([string]$why) {
-    $timer.Stop(); $script:Running = $false
+    $timer.Stop(); $script:Running = $false; Keep-Awake $false
     if ($script:Fs) { try { $script:Fs.Close() } catch {}; $script:Fs = $null }
     Close-Conn
     $lblStatus.Text = "Stopped. Press SEND to continue where it left off."
     Log ($why + "  Next SEND skips finished files.")
     Set-Busy $false
+    Tray-Note "NightSend stopped" $lblStatus.Text
 }
 
 # ---------- UI ----------
@@ -377,12 +389,39 @@ $btnBrowse.Add_Click({
     $d.SelectedPath = $txtSrc.Text
     if ($d.ShowDialog() -eq "OK") { $txtSrc.Text = $d.SelectedPath }
 })
+# ---------- background (system tray) ----------
+$tray = New-Object Windows.Forms.NotifyIcon
+$tray.Icon = [Drawing.SystemIcons]::Application
+$tray.Text = "NightSend"
+$tray.Visible = $true
+$menu = New-Object Windows.Forms.ContextMenuStrip
+[void]$menu.Items.Add("Open NightSend", $null, { Show-Window })
+[void]$menu.Items.Add("Exit", $null, { $script:Quit = $true; $form.Close() })
+$tray.ContextMenuStrip = $menu
+
+function Show-Window { $form.Show(); $form.WindowState = "Normal"; $form.ShowInTaskbar = $true; [void]$form.Activate() }
+function Hide-Window {
+    $form.ShowInTaskbar = $false; $form.Hide()
+    if ($script:Running) { $tray.BalloonTipTitle = "NightSend"; $tray.BalloonTipText = "Still sending in the background. Click the tray icon to open."; $tray.ShowBalloonTip(3000) }
+}
+function Tray-Note([string]$title, [string]$msg) {
+    if (-not $form.Visible) { $tray.BalloonTipTitle = $title; $tray.BalloonTipText = $msg; $tray.ShowBalloonTip(5000) }
+}
+$tray.Add_DoubleClick({ Show-Window })
+$tray.Add_MouseClick({ if ($_.Button -eq "Left") { Show-Window } })
+# Minimizing sends it to the tray, and keeps any transfer running.
+$form.Add_Resize({ if ($form.WindowState -eq "Minimized") { Hide-Window } })
 $form.Add_FormClosing({
+    if ($script:Running -and -not $script:Quit) {
+        # X while sending: keep sending in the background instead of stopping.
+        $_.Cancel = $true; Hide-Window; return
+    }
     if ($script:Running) {
-        $a = [Windows.Forms.MessageBox]::Show("A transfer is running. Stop it and close?", "NightSend", "YesNo", "Warning")
-        if ($a -ne "Yes") { $_.Cancel = $true; return }
+        $a = [Windows.Forms.MessageBox]::Show("A transfer is running. Stop it and exit?", "NightSend", "YesNo", "Warning")
+        if ($a -ne "Yes") { $script:Quit = $false; $_.Cancel = $true; return }
         Abort-Send "Closed."
     }
+    $tray.Visible = $false; $tray.Dispose()
 })
 $form.Add_Shown({ Log "NightSend ready. Put the phone and this PC on the same Wi-Fi, open NightSend on the phone and type its pairing code here."
     if ($SavedCode.Length -eq 6) { Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false }

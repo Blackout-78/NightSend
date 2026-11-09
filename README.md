@@ -10,3 +10,7 @@ Both on the same Wi-Fi: the PC finds the phone by itself, you only type the code
 The phone app shows a 6-digit pairing code. Type it into the **Code** box in the PC app once; the PC remembers it.
 Without the right code the phone answers nothing: no file list, no saving. 5 wrong codes in a row make a new code.
 Tap "make a new code" on the phone any time to lock out every PC until the new code is typed in.
+
+## Background
+- Phone: NightSend receives in the background (foreground service, notification). Pick the save folder with **Choose folder**.
+- PC: minimize or press X while sending and it keeps going from the system tray. Right-click the tray icon > Exit to quit.
