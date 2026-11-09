@@ -1,4 +1,4 @@
-# NightSend PC (v0.7 - same Wi-Fi + pairing code + background/tray + keeps folders / auto-sort)
+# NightSend PC (v0.8 - same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -35,7 +35,7 @@ $SavedCode = ""
 try { if (Test-Path -LiteralPath $CodeFile) { $SavedCode = ([IO.File]::ReadAllText($CodeFile)).Trim() } } catch {}
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Tcp = $null; $script:Ns = $null; $script:Rd = $null
-$script:PhoneIp = $null; $script:PhoneFree = -1; $script:PhonePath = ""
+$script:PhoneIp = $null; $script:PhoneFree = -1; $script:PhonePath = ""; $script:PhoneRoot = ""; $script:DestPath = ""
 $script:Queue = New-Object System.Collections.ArrayList
 $script:Failed = New-Object System.Collections.ArrayList
 $script:Index = 0; $script:Fs = $null; $script:Left = [int64]0
@@ -100,7 +100,8 @@ function Say-Hello {
     if (-not $r -or -not $r.StartsWith("NIGHTSEND|")) { throw "Not a NightSend phone." }
     $p = $r.Split("|")
     $script:PhoneFree = [int64]$p[2]
-    return @{ Model = $p[1]; Free = [int64]$p[2]; Path = $p[3]; StorageOk = ($p[4] -eq "1") }
+    $root = $p[3]; if ($p.Length -gt 5 -and $p[5]) { $root = $p[5] }
+    return @{ Model = $p[1]; Free = [int64]$p[2]; Path = $p[3]; StorageOk = ($p[4] -eq "1"); Root = $root }
 }
 
 # Look for the phone: USB-tethering gateways first, then the PC hotspot range, then every local /24.
@@ -148,7 +149,7 @@ function Find-PhoneIp {
 
 function Set-Busy([bool]$busy) {
     $btnSend.Enabled = -not $busy; $btnFind.Enabled = -not $busy
-    $btnBrowse.Enabled = -not $busy; $btnStop.Enabled = $busy
+    $btnBrowse.Enabled = -not $busy; $btnStop.Enabled = $busy; $btnPick.Enabled = -not $busy
     $chkRoot.Enabled = -not $busy; $chkSort.Enabled = -not $busy
 }
 
@@ -168,6 +169,7 @@ function Connect-Phone {
         $h = Say-Hello
         $script:PhoneIp = $ip
         $script:PhonePath = $h.Path
+        $script:PhoneRoot = $h.Root
         $txtIp.Text = $ip
         $lblPhone.Text = "Connected: {0}  -  {1} free  -  saving to {2}" -f $h.Model, (Fmt $h.Free), $h.Path
         $lblPhone.ForeColor = $cGood
@@ -208,12 +210,26 @@ function Start-Send {
     Set-Busy $true
     if (-not (Connect-Phone)) { Set-Busy $false; return }
 
+    # Send into the folder picked on the phone (instead of the phone's save folder).
+    if ($script:DestPath) {
+        try {
+            Send-Line ("DEST " + $script:DestPath)
+            $r = $script:Rd.ReadLine()
+            if (-not $r -or -not $r.StartsWith("OK")) { throw ("phone answered: " + $r) }
+            $q = $r.Split("|"); if ($q.Length -gt 1) { $script:PhoneFree = [int64]$q[1] }
+        } catch {
+            Log ("The phone would not use that folder (" + $_.Exception.Message + "). If it says unknown command, update the NightSend phone app.")
+            Close-Conn; Set-Busy $false; return
+        }
+    }
+
     $lblStatus.Text = "Reading files on the PC..."; [Windows.Forms.Application]::DoEvents()
     # Keep the chosen folder's own name (e.g. the show folder) unless the phone already saves into a folder of that name.
     $rootName = ""
     if ($chkRoot.Checked) {
         $leaf = Clean-Name (Split-Path $src -Leaf)
-        $phoneLeaf = ($script:PhonePath -split "[/\\]")[-1]
+        $target = $script:PhonePath; if ($script:DestPath) { $target = $script:DestPath }
+        $phoneLeaf = ($target -split "[/\\]")[-1]
         if ($leaf -and -not $leaf.EndsWith(":") -and $leaf -ne $phoneLeaf) { $rootName = $leaf }
     }
     $local = @(Get-ChildItem -LiteralPath $src -Recurse -File -Force -ErrorAction SilentlyContinue)
@@ -347,6 +363,127 @@ function Abort-Send([string]$why) {
     Tray-Note "NightSend stopped" $lblStatus.Text
 }
 
+# ---------- pick the folder on the phone ----------
+function Get-PhoneDirs([string]$path) {
+    Send-Line ("DIRS " + $path)
+    $names = New-Object System.Collections.ArrayList
+    while ($true) {
+        $l = $script:Rd.ReadLine()
+        if ($l -eq $null -or $l -eq "END") { break }
+        if ($l.StartsWith("ERR")) { throw $l }
+        [void]$names.Add($l)
+    }
+    return ,$names
+}
+
+function Ask-Text([string]$title) {
+    $f = New-Object Windows.Forms.Form
+    $f.Text = $title; $f.ClientSize = New-Object Drawing.Size(360, 90); $f.StartPosition = "CenterParent"
+    $f.FormBorderStyle = "FixedDialog"; $f.MaximizeBox = $false; $f.MinimizeBox = $false
+    $f.BackColor = $cBg; $f.ForeColor = $cText; $f.Font = $fUi
+    $t = New-Object Windows.Forms.TextBox; $t.Location = New-Object Drawing.Point(16, 14); $t.Size = New-Object Drawing.Size(328, 28)
+    $t.BackColor = $cPanel; $t.ForeColor = $cText; $t.BorderStyle = "FixedSingle"; $f.Controls.Add($t)
+    $ok = New-Object Windows.Forms.Button; $ok.Text = "OK"; $ok.Location = New-Object Drawing.Point(16, 50); $ok.Size = New-Object Drawing.Size(110, 30)
+    $ok.FlatStyle = "Flat"; $ok.BackColor = $cAccent; $ok.ForeColor = $cText; $ok.DialogResult = "OK"; $f.Controls.Add($ok)
+    $f.AcceptButton = $ok
+    $res = $null
+    if ($f.ShowDialog($form) -eq "OK") { $res = $t.Text.Trim() }
+    $f.Dispose()
+    return $res
+}
+
+function Pick-PhoneFolder {
+    Set-Busy $true; $btnStop.Enabled = $false
+    try {
+        if (-not (Connect-Phone)) { return }
+        $root = $script:PhoneRoot.TrimEnd("/")
+        $script:DlgPath = $script:PhonePath
+        if ($script:DestPath) { $script:DlgPath = $script:DestPath }
+        $script:DlgChoice = $null
+
+        $dlg = New-Object Windows.Forms.Form
+        $dlg.Text = "Pick the folder on the phone"; $dlg.ClientSize = New-Object Drawing.Size(560, 490)
+        $dlg.BackColor = $cBg; $dlg.ForeColor = $cText; $dlg.Font = $fUi; $dlg.StartPosition = "CenterParent"
+        $dlg.FormBorderStyle = "FixedDialog"; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+        $lblP = New-Object Windows.Forms.Label
+        $lblP.Location = New-Object Drawing.Point(16, 12); $lblP.Size = New-Object Drawing.Size(528, 44); $lblP.ForeColor = $cDim
+        $dlg.Controls.Add($lblP)
+        $list = New-Object Windows.Forms.ListBox
+        $list.Location = New-Object Drawing.Point(16, 60); $list.Size = New-Object Drawing.Size(528, 330)
+        $list.BackColor = $cPanel; $list.ForeColor = $cText; $list.BorderStyle = "FixedSingle"
+        $dlg.Controls.Add($list)
+        $mk = {
+            param($t, $x, $y, $w)
+            $b = New-Object Windows.Forms.Button
+            $b.Text = $t; $b.Location = New-Object Drawing.Point($x, $y); $b.Size = New-Object Drawing.Size($w, 32)
+            $b.FlatStyle = "Flat"; $b.BackColor = $cPanel; $b.ForeColor = $cText; $b.FlatAppearance.BorderColor = $cAccent
+            $dlg.Controls.Add($b); $b
+        }
+        $bUp = & $mk "Up" 16 400 90
+        $bOpen = & $mk "Open" 112 400 90
+        $bNew = & $mk "New folder" 208 400 130
+        $bUse = & $mk "Use this folder" 16 442 170
+        $bUse.BackColor = $cAccent
+        $bDef = & $mk "Phone's save folder" 192 442 190
+        $bCancel = & $mk "Cancel" 388 442 156
+
+        $refresh = {
+            try {
+                $names = Get-PhoneDirs $script:DlgPath
+                $list.Items.Clear(); foreach ($n in $names) { [void]$list.Items.Add($n) }
+                $lblP.Text = $script:DlgPath; $lblP.ForeColor = $cDim
+            } catch {
+                $lblP.Text = "Could not read that folder: " + $_.Exception.Message + "   (If it says unknown command, update the phone app.)"
+                $lblP.ForeColor = $cAccent
+            }
+        }
+        $open = {
+            $n = $list.SelectedItem
+            if ($n) { $script:DlgPath = $script:DlgPath.TrimEnd("/") + "/" + $n; & $refresh }
+        }
+        $bUp.Add_Click({
+            $p = $script:DlgPath.TrimEnd("/")
+            if ($p.Length -gt $root.Length) {
+                $script:DlgPath = $p.Substring(0, $p.LastIndexOf("/"))
+                if ($script:DlgPath.Length -lt $root.Length) { $script:DlgPath = $root }
+                & $refresh
+            }
+        })
+        $bOpen.Add_Click({ & $open })
+        $list.Add_DoubleClick({ & $open })
+        $bNew.Add_Click({
+            $n = Ask-Text "Name of the new folder"
+            if ($n) {
+                $n = (Clean-Name $n) -replace "[/\\]", " "
+                if ($n) {
+                    $np = $script:DlgPath.TrimEnd("/") + "/" + $n
+                    try {
+                        Send-Line ("MKDIR " + $np)
+                        $r = $script:Rd.ReadLine()
+                        if ($r -eq "OK") { $script:DlgPath = $np } else { throw ("phone answered: " + $r) }
+                    } catch { $lblP.Text = "Could not make the folder: " + $_.Exception.Message; $lblP.ForeColor = $cAccent; return }
+                    & $refresh
+                }
+            }
+        })
+        $bUse.Add_Click({ $script:DlgChoice = $script:DlgPath; $dlg.DialogResult = "OK" })
+        $bDef.Add_Click({ $script:DlgChoice = ""; $dlg.DialogResult = "OK" })
+        $bCancel.Add_Click({ $dlg.DialogResult = "Cancel" })
+        & $refresh
+        [void]$dlg.ShowDialog($form)
+        $dlg.Dispose()
+        if ($script:DlgChoice -ne $null) {
+            if ($script:DlgChoice -eq $script:PhonePath) { $script:DlgChoice = "" }
+            $script:DestPath = $script:DlgChoice
+            if ($script:DestPath) { $txtDest.Text = $script:DestPath } else { $txtDest.Text = "(the phone's save folder)" }
+        }
+    } catch {
+        Log ("Could not browse the phone: " + $_.Exception.Message)
+    } finally {
+        Close-Conn; Set-Busy $false
+    }
+}
+
 # ---------- UI ----------
 $form = New-Object Windows.Forms.Form
 $form.Text = "NightSend"
@@ -393,28 +530,32 @@ $lblPhone = L "Not connected." 20 164 680 40 $null $cDim
 [void](L "2  SEND FROM (this PC)" 20 210 300 22 $fBold $cDim)
 $txtSrc = T "D:\BnM\TV & Movie\TV" 20 234 560
 $btnBrowse = B "Browse" 590 231 110
+[void](L "Put it in (phone):" 20 268 126 22 $null $cDim)
+$txtDest = T "(the phone's save folder)" 148 264 426
+$txtDest.ReadOnly = $true
+$btnPick = B "Pick on phone" 584 261 116
 $chkRoot = New-Object Windows.Forms.CheckBox
-$chkRoot.Text = "Keep the folder name"; $chkRoot.Checked = $true
-$chkRoot.Location = New-Object Drawing.Point(20, 264); $chkRoot.Size = New-Object Drawing.Size(190, 26); $chkRoot.ForeColor = $cText
+$chkRoot.Text = "Make a folder with its name"; $chkRoot.Checked = $true
+$chkRoot.Location = New-Object Drawing.Point(20, 298); $chkRoot.Size = New-Object Drawing.Size(240, 26); $chkRoot.ForeColor = $cText
 $form.Controls.Add($chkRoot)
 $chkSort = New-Object Windows.Forms.CheckBox
 $chkSort.Text = "Auto-sort loose files by name (Show / Season)"; $chkSort.Checked = $true
-$chkSort.Location = New-Object Drawing.Point(220, 264); $chkSort.Size = New-Object Drawing.Size(480, 26); $chkSort.ForeColor = $cText
+$chkSort.Location = New-Object Drawing.Point(270, 298); $chkSort.Size = New-Object Drawing.Size(430, 26); $chkSort.ForeColor = $cText
 $form.Controls.Add($chkSort)
 
-$btnSend = B "SEND" 20 300 150
+$btnSend = B "SEND" 20 334 150
 $btnSend.BackColor = $cAccent; $btnSend.Font = $fBold
-$btnStop = B "Stop" 180 300 110; $btnStop.Enabled = $false
+$btnStop = B "Stop" 180 334 110; $btnStop.Enabled = $false
 
 $bar = New-Object Windows.Forms.ProgressBar
-$bar.Location = New-Object Drawing.Point(20, 348); $bar.Size = New-Object Drawing.Size(680, 18); $bar.Maximum = 1000
+$bar.Location = New-Object Drawing.Point(20, 380); $bar.Size = New-Object Drawing.Size(680, 18); $bar.Maximum = 1000
 $form.Controls.Add($bar)
-$lblStatus = L "Ready." 20 372 680 22 $null $cText
-$lblFile = L "" 20 394 680 22 $null $cDim
+$lblStatus = L "Ready." 20 404 680 22 $null $cText
+$lblFile = L "" 20 426 680 22 $null $cDim
 
 $txtLog = New-Object Windows.Forms.TextBox
 $txtLog.Multiline = $true; $txtLog.ScrollBars = "Vertical"; $txtLog.ReadOnly = $true
-$txtLog.Location = New-Object Drawing.Point(20, 424); $txtLog.Size = New-Object Drawing.Size(680, 160)
+$txtLog.Location = New-Object Drawing.Point(20, 456); $txtLog.Size = New-Object Drawing.Size(680, 128)
 $txtLog.BackColor = $cPanel; $txtLog.ForeColor = $cDim; $txtLog.BorderStyle = "FixedSingle"
 $txtLog.Font = New-Object Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
@@ -425,6 +566,7 @@ $timer.Add_Tick({ On-Tick })
 
 $btnFind.Add_Click({ Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false })
 $btnSend.Add_Click({ Start-Send })
+$btnPick.Add_Click({ Pick-PhoneFolder })
 $btnStop.Add_Click({ Abort-Send "Stopped by you." })
 $btnBrowse.Add_Click({
     $d = New-Object Windows.Forms.FolderBrowserDialog

@@ -41,6 +41,9 @@ import java.util.Locale;
  * Protocol (one line commands, UTF-8, ending in \n):
  *   PAIR code        -> OK, or ERR code (must be the first line; nothing else is answered before it)
  *   HELLO            -> NIGHTSEND|model|freeBytes|destPath|storageOk(1/0)
+ *   DIRS [path]      -> folder names inside path (default: save folder), then END
+ *   DEST path        -> OK|freeBytes: this session saves into path instead of the save folder
+ *   MKDIR path       -> OK or ERR reason
  *   LIST             -> size|relativePath lines, then END
  *   PUT size relPath -> (then exactly size bytes) -> OK or ERR reason
  *   BYE
@@ -112,6 +115,22 @@ public class TransferService extends Service {
         double d = b; int i = 0;
         while (d >= 1024 && i < 4) { d /= 1024; i++; }
         return String.format(Locale.US, "%.1f %s", d, u[i]);
+    }
+
+    /** Only folders on the phone's own storage may be browsed or written to, never "..". */
+    static boolean allowed(String p) {
+        if (p.isEmpty() || !p.startsWith("/")) return false;
+        for (String part : p.split("/")) if (part.equals("..")) return false;
+        return p.startsWith("/storage/") || p.startsWith(Environment.getExternalStorageDirectory().getPath());
+    }
+
+    /** Top of the storage volume a folder is on (phone storage or an SD card). */
+    static String rootOf(File dest) {
+        String ext = Environment.getExternalStorageDirectory().getPath();
+        String p = dest.getPath();
+        if (p.startsWith(ext)) return ext;
+        if (p.startsWith("/storage/")) { int i = p.indexOf('/', 9); return i < 0 ? p : p.substring(0, i); }
+        return ext;
     }
 
     static boolean hasStorage(Context c) {
@@ -304,13 +323,38 @@ public class TransferService extends Service {
             s.setSoTimeout(60000);   // a dead PC frees the phone after 60 s
             s.setKeepAlive(true);
             byte[] buf = new byte[1 << 20];
+            File sessionDest = null;   // set by DEST; lasts for this connection only
             String line;
             while ((line = readLine(in)) != null) {
-                File dest = destFolder(this);
+                File dest = sessionDest != null ? sessionDest : destFolder(this);
                 if (line.equals("HELLO")) {
                     dest.mkdirs();
                     send(out, "NIGHTSEND|" + Build.MANUFACTURER + " " + Build.MODEL + "|" + freeBytes(dest) + "|" +
-                            dest.getPath() + "|" + (hasStorage(this) ? 1 : 0));
+                            dest.getPath() + "|" + (hasStorage(this) ? 1 : 0) + "|" + rootOf(dest));
+                } else if (line.equals("DIRS") || line.startsWith("DIRS ")) {
+                    String p = line.length() > 5 ? line.substring(5).trim() : "";
+                    if (!p.isEmpty() && !allowed(p)) { send(out, "ERR not allowed"); continue; }
+                    File[] kids = (p.isEmpty() ? dest : new File(p)).listFiles(f -> f.isDirectory() && !f.getName().startsWith("."));
+                    StringBuilder sb = new StringBuilder();
+                    if (kids != null) {
+                        java.util.Arrays.sort(kids, (x, y) -> x.getName().compareToIgnoreCase(y.getName()));
+                        for (File k : kids) sb.append(k.getName()).append('\n');
+                    }
+                    sb.append("END\n");
+                    out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                } else if (line.startsWith("DEST ")) {
+                    String p = line.substring(5).trim();
+                    File d = new File(p);
+                    if (!allowed(p)) send(out, "ERR not allowed");
+                    else if (!d.isDirectory() && !d.mkdirs()) send(out, "ERR cannot create folder");
+                    else { sessionDest = d; send(out, "OK|" + freeBytes(d)); }
+                } else if (line.startsWith("MKDIR ")) {
+                    String p = line.substring(6).trim();
+                    File d = new File(p);
+                    if (!allowed(p)) send(out, "ERR not allowed");
+                    else if (!d.isDirectory() && !d.mkdirs()) send(out, "ERR cannot create folder");
+                    else send(out, "OK");
                 } else if (line.equals("LIST")) {
                     StringBuilder sb = new StringBuilder();
                     walk(dest, "", sb);
