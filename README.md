@@ -6,6 +6,18 @@ Both on the same Wi-Fi: the PC finds the phone by itself, you only type the code
 - `app/` - Android receiver app (APK built automatically by GitHub Actions, see Releases)
 - PC sender: `NightSend.exe` (see Releases), or `pc/NightSend.bat` + `pc/NightSend.ps1` (Windows 10/11, nothing to install)
 
+## Screens
+
+These are design previews. The finished app follows this look.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/01-phone-code.png" width="180" alt="Phone code"></td>
+    <td><img src="docs/screenshots/02-receiving.png" width="180" alt="Receiving"></td>
+    <td><img src="docs/screenshots/03-pc-sender.png" width="360" alt="Pc sender"></td>
+  </tr>
+</table>
+
 ## Pairing code (v0.3)
 The phone app shows a 6-digit pairing code. Type it into the **Code** box in the PC app once; the PC remembers it.
 Without the right code the phone answers nothing: no file list, no saving. 5 wrong codes in a row make a new code.
