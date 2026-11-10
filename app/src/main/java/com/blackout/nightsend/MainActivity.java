@@ -93,15 +93,15 @@ public class MainActivity extends Activity {
         progressView = text("", 15, DIM);
         root.addView(progressView);
 
-        root.addView(header("PAIRING CODE (type this into the PC app)"));
+        root.addView(header("PAIRING CODE (needed once per PC)"));
         codeView = text("", 34, TEXT);
         codeView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
         codeView.setLetterSpacing(0.15f);
         root.addView(codeView);
-        TextView newCodeBtn = text("Tap here to make a new code", 13, ACCENT);
+        TextView newCodeBtn = text("Tap here to forget all paired PCs and make a new code", 13, ACCENT);
         newCodeBtn.setOnClickListener(v -> {
-            TransferService.newCode(this);
-            TransferService.status = "New code made. Type it into the PC app.";
+            TransferService.forgetAll(this);
+            TransferService.status = "All PCs forgotten. New code made. Type it into the PC app.";
         });
         root.addView(newCodeBtn);
 

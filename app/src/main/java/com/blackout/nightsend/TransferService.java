@@ -29,6 +29,7 @@ import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.Locale;
@@ -38,8 +39,8 @@ import java.util.Locale;
  * screen off and the app closed. Listens on port 47800 for the NightSend PC app on the
  * same Wi-Fi. No internet, no cloud.
  *
- * Protocol (one line commands, UTF-8, ending in \n):
- *   PAIR code        -> OK, or ERR code (must be the first line; nothing else is answered before it)
+ * Protocol v2: a key exchange (see Secure.java) first, then everything is encrypted. After it,
+ * one line commands, UTF-8, ending in \n:
  *   HELLO            -> NIGHTSEND|model|freeBytes|destPath|storageOk(1/0)
  *   DIRS [path]      -> folder names inside path (default: save folder), then END
  *   DEST path        -> OK|freeBytes: this session saves into path instead of the save folder
@@ -92,6 +93,37 @@ public class TransferService extends Service {
         pairCode = String.format(Locale.US, "%06d", RNG.nextInt(1000000));
         wrongTries = 0;
         prefs(c).edit().putString("code", pairCode).apply();
+    }
+
+    static final int MAX_PCS = 8;
+
+    /** Paired PCs are kept as "keyId:keyHex;..." in the app's private storage. */
+    static synchronized byte[] findKey(Context c, String id) {
+        String all = prefs(c).getString("keys", "");
+        for (String e : all.split(";")) {
+            String[] p = e.split(":");
+            if (p.length == 2 && p[0].equals(id) && Secure.isHex(p[1], 64)) return Secure.unhex(p[1]);
+        }
+        return null;
+    }
+
+    static synchronized void addKey(Context c, byte[] key) {
+        String id = Secure.keyId(key);
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (String e : prefs(c).getString("keys", "").split(";")) {
+            if (e.isEmpty() || e.startsWith(id + ":")) continue;
+            if (++n >= MAX_PCS) break;    // oldest ones fall off
+            sb.append(e).append(';');
+        }
+        sb.append(id).append(':').append(Secure.hex(key));
+        prefs(c).edit().putString("keys", sb.toString()).apply();
+    }
+
+    /** Locks out every PC: forgets all pairings and makes a new code. */
+    static synchronized void forgetAll(Context c) {
+        prefs(c).edit().remove("keys").apply();
+        newCode(c);
     }
 
     /** The folder on the phone where received files go. */
@@ -277,36 +309,67 @@ public class TransferService extends Service {
         try { Thread.sleep(ms); } catch (InterruptedException ignored) { }
     }
 
-    /** Checks the PAIR line. Compares in constant time so the timing gives nothing away. */
-    boolean codeMatches(String line) {
-        if (line == null || !line.startsWith("PAIR ")) return false;
-        byte[] a = line.substring(5).trim().getBytes(StandardCharsets.UTF_8);
-        byte[] b = pairCode.getBytes(StandardCharsets.UTF_8);
-        return MessageDigest.isEqual(a, b);
-    }
-
     void handle(Socket s) {
         try {
-            // Nothing is answered or shown until the right code arrives.
+            // Nothing is answered or shown until the PC proves it knows the code or a saved key.
             s.setSoTimeout(10000);
-            InputStream in = new BufferedInputStream(s.getInputStream(), 1 << 20);
-            OutputStream out = s.getOutputStream();
-            String first = readLine(in);
-            if (!codeMatches(first)) {
-                if (first == null) return; // a plain "is anyone there?" knock from Find phone
-                wrongTries++;
-                if (wrongTries >= MAX_WRONG) {
-                    newCode(this);
-                    status = "Wrong code tried " + MAX_WRONG + " times. A new code was made.";
-                } else {
-                    status = "Wrong pairing code from " + s.getInetAddress().getHostAddress() + ". Blocked.";
-                }
-                Thread.sleep(1000); // slows down guessing
-                send(out, "ERR code");
+            InputStream raw = new BufferedInputStream(s.getInputStream(), 1 << 20);
+            OutputStream rawOut = s.getOutputStream();
+            String first = readLine(raw);
+            if (first == null) return; // a plain "is anyone there?" knock from Find phone
+            if (!first.startsWith("NS2 ") || !Secure.isHex(first.substring(4), 128)) {
+                send(rawOut, "ERR version"); // an older PC app: it needs the newest NightSend.exe
                 return;
             }
+            byte[] pc = Secure.unhex(first.substring(4));
+            KeyPair kp = Secure.newKeyPair();
+            byte[] ph = Secure.pubRaw(kp);
+            byte[] zh = Secure.sharedHash(kp, pc);
+            send(rawOut, Secure.hex(ph));
+
+            String second = readLine(raw);
+            if (second == null) return;
+            byte[] t = Secure.cat(pc, ph);
+            byte[] k = null;
+            byte[] proof = null;
+            boolean pairing = false;
+            String[] w = second.split(" ");
+            if (w.length == 3 && w[0].equals("AUTH") && Secure.isHex(w[1], 16) && Secure.isHex(w[2], 64)) {
+                k = findKey(this, w[1]);
+                proof = Secure.unhex(w[2]);
+            } else if (w.length == 2 && w[0].equals("PAIR") && Secure.isHex(w[1], 64)) {
+                pairing = true;
+                k = Secure.utf8(pairCode);
+                proof = Secure.unhex(w[1]);
+            }
+            boolean good = k != null && proof != null
+                    && MessageDigest.isEqual(proof, Secure.hmac(k, Secure.utf8("NS2-C"), t));
+            if (!good) {
+                if (pairing) {
+                    wrongTries++;
+                    if (wrongTries >= MAX_WRONG) {
+                        newCode(this);
+                        status = "Wrong code tried " + MAX_WRONG + " times. A new code was made.";
+                    } else {
+                        status = "Wrong pairing code from " + s.getInetAddress().getHostAddress() + ". Blocked.";
+                    }
+                } else {
+                    status = "Unknown or forgotten PC from " + s.getInetAddress().getHostAddress() + ". Blocked.";
+                }
+                Thread.sleep(1000); // slows down guessing
+                send(rawOut, pairing ? "ERR code" : "ERR auth");
+                return;
+            }
+            send(rawOut, "OK " + Secure.hex(Secure.hmac(k, Secure.utf8("NS2-S"), t)));
+            if (pairing) {
+                addKey(this, Secure.hmac(zh, Secure.utf8("NS2-PAIRKEY"), t));
+                newCode(this);   // the code was used up: the next PC needs a fresh one
+                status = "PC paired. A new code was made for the next PC.";
+            }
             wrongTries = 0;
-            send(out, "OK");
+            Secure.Keys keys = new Secure.Keys(Secure.hmac(k, Secure.utf8("NS2-MASTER"), zh, t));
+            InputStream in = new Secure.In(raw, keys.c2sEnc, keys.c2sMac);
+            OutputStream out = new Secure.Out(rawOut, keys.s2cEnc, keys.s2cMac);
             session(s, in, out);
         } catch (Exception e) {
             // ignore: a bad or dropped connection before pairing

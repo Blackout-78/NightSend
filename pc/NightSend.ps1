@@ -1,4 +1,4 @@
-# NightSend PC (v1.0 - same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder + no freezing + auto-reconnect)
+# NightSend PC (v2.0 - encrypted + same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder + no freezing + auto-reconnect)
 # Sends a whole folder from this PC to the NightSend phone app.
 # Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
@@ -24,15 +24,305 @@ try {
 function Keep-Awake([bool]$on) {
     try { if ($on) { [void][NS.Power]::SetThreadExecutionState([uint32]2147483649) } else { [void][NS.Power]::SetThreadExecutionState([uint32]2147483648) } } catch {}
 }
+
+# ---------- NightSend protocol v2: key exchange + encrypted frames (same as Secure.java on the phone) ----------
+Add-Type -AssemblyName System.Security
+$NsCryptoSource = @'
+//CS-BEGIN
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
+using System.Text;
+using System.Threading;
+
+public class NsAuthException : Exception {
+    public string Reply;
+    public NsAuthException(string reply) : base(reply) { Reply = reply; }
+}
+
+public static class NsCrypto {
+    public const int MaxPlain = 262144;
+    public const int MaxFrame = 16 + 262144 + 16 + 32;
+
+    public static byte[] Cat(params byte[][] parts) {
+        int n = 0; foreach (byte[] p in parts) n += p.Length;
+        byte[] r = new byte[n]; int o = 0;
+        foreach (byte[] p in parts) { Buffer.BlockCopy(p, 0, r, o, p.Length); o += p.Length; }
+        return r;
+    }
+    public static byte[] Utf8(string s) { return new UTF8Encoding(false).GetBytes(s); }
+    public static byte[] Hmac(byte[] key, params byte[][] parts) {
+        using (HMACSHA256 h = new HMACSHA256(key)) { return h.ComputeHash(Cat(parts)); }
+    }
+    public static byte[] Sha256(byte[] b) { using (SHA256 h = SHA256.Create()) { return h.ComputeHash(b); } }
+    public static string Hex(byte[] b) {
+        StringBuilder sb = new StringBuilder();
+        foreach (byte x in b) sb.Append(x.ToString("x2"));
+        return sb.ToString();
+    }
+    public static bool IsHex(string s, int len) {
+        if (s == null || s.Length != len) return false;
+        foreach (char c in s) { if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false; }
+        return true;
+    }
+    public static byte[] FromHex(string s) {
+        byte[] r = new byte[s.Length / 2];
+        for (int i = 0; i < r.Length; i++) r[i] = Convert.ToByte(s.Substring(i * 2, 2), 16);
+        return r;
+    }
+    public static bool Equal(byte[] a, byte[] b) {
+        if (a.Length != b.Length) return false;
+        int d = 0; for (int i = 0; i < a.Length; i++) d |= a[i] ^ b[i];
+        return d == 0;
+    }
+    public static byte[] Seq(ulong n) {
+        byte[] b = new byte[8];
+        for (int i = 7; i >= 0; i--) { b[i] = (byte)(n & 0xFF); n >>= 8; }
+        return b;
+    }
+    public static string KeyId(byte[] pairKey) {
+        byte[] h = Sha256(pairKey); byte[] r = new byte[8]; Buffer.BlockCopy(h, 0, r, 0, 8); return Hex(r);
+    }
+
+    public static ECDiffieHellmanCng NewKey() {
+        ECDiffieHellmanCng k = new ECDiffieHellmanCng(256);
+        k.KeyDerivationFunction = ECDiffieHellmanKeyDerivationFunction.Hash;
+        k.HashAlgorithm = CngAlgorithm.Sha256;
+        return k;
+    }
+    // 64 raw bytes: X then Y (the Windows blob has an 8 byte header in front)
+    public static byte[] PubRaw(ECDiffieHellmanCng k) {
+        byte[] blob = k.Key.Export(CngKeyBlobFormat.EccPublicBlob);
+        byte[] raw = new byte[64]; Buffer.BlockCopy(blob, 8, raw, 0, 64); return raw;
+    }
+    // SHA-256 of the shared secret, the same value the phone derives
+    public static byte[] Shared(ECDiffieHellmanCng k, byte[] peerRaw) {
+        if (peerRaw.Length != 64) throw new IOException("bad public key");
+        byte[] blob = new byte[72];
+        blob[0] = 0x45; blob[1] = 0x43; blob[2] = 0x4B; blob[3] = 0x31; blob[4] = 0x20;   // "ECK1", 32 byte coordinates
+        Buffer.BlockCopy(peerRaw, 0, blob, 8, 64);
+        using (CngKey pk = CngKey.Import(blob, CngKeyBlobFormat.EccPublicBlob)) { return k.DeriveKeyMaterial(pk); }
+    }
+
+    public static string ReadLine(Stream s) {
+        StringBuilder sb = new StringBuilder();
+        byte[] one = new byte[1];
+        while (true) {
+            int n = s.Read(one, 0, 1);
+            if (n <= 0) { if (sb.Length == 0) return null; break; }
+            if (one[0] == 10) break;
+            if (one[0] != 13) sb.Append((char)one[0]);
+            if (sb.Length > 1024) throw new IOException("line too long");
+        }
+        return sb.ToString();
+    }
+    public static void WriteLine(Stream s, string line) {
+        byte[] b = Utf8(line + "\n"); s.Write(b, 0, b.Length); s.Flush();
+    }
+
+    // PC side. pairKey != null: use the saved key (AUTH). Otherwise use the 6-digit code (PAIR).
+    public static SecureStream ClientHandshake(Stream raw, string code, byte[] pairKey, out byte[] newPairKey) {
+        newPairKey = null;
+        ECDiffieHellmanCng k = NewKey();
+        byte[] pc = PubRaw(k);
+        WriteLine(raw, "NS2 " + Hex(pc));
+        string r = ReadLine(raw);
+        if (r == null) throw new IOException("The phone closed the connection.");
+        if (!IsHex(r, 128)) throw new NsAuthException("ERR version");
+        byte[] ph = FromHex(r);
+        byte[] t = Cat(pc, ph);
+        byte[] zh = Shared(k, ph);
+        byte[] key;
+        if (pairKey != null) {
+            key = pairKey;
+            WriteLine(raw, "AUTH " + KeyId(pairKey) + " " + Hex(Hmac(key, Utf8("NS2-C"), t)));
+        } else {
+            key = Utf8(code);
+            WriteLine(raw, "PAIR " + Hex(Hmac(key, Utf8("NS2-C"), t)));
+        }
+        string ok = ReadLine(raw);
+        if (ok == null) throw new IOException("The phone closed the connection.");
+        if (ok.StartsWith("ERR")) throw new NsAuthException(ok);
+        if (!ok.StartsWith("OK ") || !IsHex(ok.Substring(3), 64)) throw new IOException("Unexpected answer from the phone.");
+        if (!Equal(FromHex(ok.Substring(3)), Hmac(key, Utf8("NS2-S"), t))) throw new IOException("The phone could not prove who it is. Not trusted.");
+        byte[] master = Hmac(key, Utf8("NS2-MASTER"), zh, t);
+        newPairKey = pairKey != null ? pairKey : Hmac(zh, Utf8("NS2-PAIRKEY"), t);
+        return new SecureStream(raw,
+            Hmac(master, Utf8("c2s-enc")), Hmac(master, Utf8("c2s-mac")),
+            Hmac(master, Utf8("s2c-enc")), Hmac(master, Utf8("s2c-mac")));
+    }
+
+    // ---- self test (used by the build, never by the app): plays the phone over loopback ----
+    static void ServerRound(TcpClient c, string code, ref byte[] stored) {
+        NetworkStream raw = c.GetStream();
+        string first = ReadLine(raw);
+        byte[] pc = FromHex(first.Substring(4));
+        ECDiffieHellmanCng k = NewKey();
+        byte[] ph = PubRaw(k); byte[] zh = Shared(k, pc);
+        WriteLine(raw, Hex(ph));
+        string[] w = ReadLine(raw).Split(' ');
+        byte[] t = Cat(pc, ph);
+        bool pairing = w[0] == "PAIR";
+        byte[] key = pairing ? Utf8(code) : stored;
+        string proof = pairing ? w[1] : w[2];
+        if (key == null || !Equal(FromHex(proof), Hmac(key, Utf8("NS2-C"), t))) { WriteLine(raw, pairing ? "ERR code" : "ERR auth"); return; }
+        WriteLine(raw, "OK " + Hex(Hmac(key, Utf8("NS2-S"), t)));
+        if (pairing) stored = Hmac(zh, Utf8("NS2-PAIRKEY"), t);
+        byte[] master = Hmac(key, Utf8("NS2-MASTER"), zh, t);
+        SecureStream s = new SecureStream(raw,
+            Hmac(master, Utf8("s2c-enc")), Hmac(master, Utf8("s2c-mac")),
+            Hmac(master, Utf8("c2s-enc")), Hmac(master, Utf8("c2s-mac")));
+        string cmd = ReadLine(s);
+        byte[] buf = new byte[1000000]; int got = 0;
+        while (got < buf.Length) { int n = s.Read(buf, got, buf.Length - got); if (n <= 0) throw new IOException("eof"); got += n; }
+        WriteLine(s, "ECHO " + cmd + " " + Hex(Sha256(buf)));
+    }
+
+    public static string SelfTest() {
+        TcpListener l = new TcpListener(IPAddress.Loopback, 0); l.Start();
+        int port = ((IPEndPoint)l.LocalEndpoint).Port;
+        string error = null; byte[] stored = null;
+        Thread th = new Thread(delegate() {
+            try { for (int i = 0; i < 3; i++) { using (TcpClient c = l.AcceptTcpClient()) { ServerRound(c, "123456", ref stored); } } }
+            catch (Exception e) { error = "server: " + e.ToString(); }
+        });
+        th.Start();
+        try {
+            byte[] np;
+            // 1: wrong code is refused
+            using (TcpClient c = new TcpClient("127.0.0.1", port)) {
+                try { ClientHandshake(c.GetStream(), "000000", null, out np); return "FAIL: wrong code was accepted"; }
+                catch (NsAuthException e) { if (e.Reply != "ERR code") return "FAIL: " + e.Reply; }
+            }
+            // 2: pair with the code, send 1 MB, check the phone saw the same bytes
+            byte[] key = null; byte[] data = new byte[1000000]; new Random(7).NextBytes(data);
+            using (TcpClient c = new TcpClient("127.0.0.1", port)) {
+                SecureStream s = ClientHandshake(c.GetStream(), "123456", null, out key);
+                WriteLine(s, "HELLO"); s.Write(data, 0, data.Length); s.Flush();
+                if (ReadLine(s) != "ECHO HELLO " + Hex(Sha256(data))) return "FAIL: pair round data mismatch";
+            }
+            // 3: come back with the saved key only
+            using (TcpClient c = new TcpClient("127.0.0.1", port)) {
+                SecureStream s = ClientHandshake(c.GetStream(), "", key, out np);
+                WriteLine(s, "AGAIN"); s.Write(data, 0, data.Length); s.Flush();
+                if (ReadLine(s) != "ECHO AGAIN " + Hex(Sha256(data))) return "FAIL: key round data mismatch";
+            }
+        } catch (Exception e) { return "FAIL: " + e.ToString(); }
+        th.Join(10000); l.Stop();
+        return error == null ? "OK" : "FAIL: " + error;
+    }
+}
+
+public class SecureStream : Stream {
+    Stream inner; byte[] sEnc, sMac, rEnc, rMac;
+    ulong sSeq = 0, rSeq = 0;
+    byte[] rbuf = new byte[0]; int rpos = 0;
+    object wlock = new object();
+    static RandomNumberGenerator rng = RandomNumberGenerator.Create();
+
+    public SecureStream(Stream inner, byte[] sEnc, byte[] sMac, byte[] rEnc, byte[] rMac) {
+        this.inner = inner; this.sEnc = sEnc; this.sMac = sMac; this.rEnc = rEnc; this.rMac = rMac;
+    }
+    public bool DataAvailable {
+        get {
+            if (rpos < rbuf.Length) return true;
+            NetworkStream ns = inner as NetworkStream;
+            return ns != null && ns.DataAvailable;
+        }
+    }
+    public override bool CanRead { get { return true; } }
+    public override bool CanWrite { get { return true; } }
+    public override bool CanSeek { get { return false; } }
+    public override long Length { get { throw new NotSupportedException(); } }
+    public override long Position { get { throw new NotSupportedException(); } set { throw new NotSupportedException(); } }
+    public override long Seek(long o, SeekOrigin so) { throw new NotSupportedException(); }
+    public override void SetLength(long v) { throw new NotSupportedException(); }
+    public override void Flush() { inner.Flush(); }
+
+    public override void Write(byte[] buffer, int offset, int count) {
+        lock (wlock) {
+            while (count > 0) {
+                int n = Math.Min(count, NsCrypto.MaxPlain);
+                byte[] iv = new byte[16]; rng.GetBytes(iv);
+                byte[] ct;
+                using (Aes aes = Aes.Create()) {
+                    aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+                    using (ICryptoTransform t = aes.CreateEncryptor(sEnc, iv)) { ct = t.TransformFinalBlock(buffer, offset, n); }
+                }
+                byte[] mac = NsCrypto.Hmac(sMac, NsCrypto.Seq(sSeq), iv, ct); sSeq++;
+                int len = 16 + ct.Length + 32;
+                byte[] f = new byte[4 + len];
+                f[0] = (byte)(len >> 24); f[1] = (byte)(len >> 16); f[2] = (byte)(len >> 8); f[3] = (byte)len;
+                Buffer.BlockCopy(iv, 0, f, 4, 16);
+                Buffer.BlockCopy(ct, 0, f, 20, ct.Length);
+                Buffer.BlockCopy(mac, 0, f, 20 + ct.Length, 32);
+                inner.Write(f, 0, f.Length);
+                offset += n; count -= n;
+            }
+        }
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) {
+        if (count == 0) return 0;
+        if (rpos >= rbuf.Length) { if (!NextFrame()) return 0; }
+        int n = Math.Min(count, rbuf.Length - rpos);
+        Buffer.BlockCopy(rbuf, rpos, buffer, offset, n);
+        rpos += n;
+        return n;
+    }
+
+    byte[] ReadExact(int len, int have, byte[] f) {
+        while (have < len) {
+            int m = inner.Read(f, have, len - have);
+            if (m <= 0) throw new IOException("connection closed");
+            have += m;
+        }
+        return f;
+    }
+
+    bool NextFrame() {
+        byte[] h = new byte[4];
+        int g = inner.Read(h, 0, 4);
+        if (g <= 0) return false;
+        ReadExact(4, g, h);
+        int len = (h[0] << 24) | (h[1] << 16) | (h[2] << 8) | h[3];
+        if (len < 64 || len > NsCrypto.MaxFrame) throw new IOException("bad frame size");
+        byte[] f = ReadExact(len, 0, new byte[len]);
+        byte[] iv = new byte[16]; Buffer.BlockCopy(f, 0, iv, 0, 16);
+        byte[] ct = new byte[len - 48]; Buffer.BlockCopy(f, 16, ct, 0, ct.Length);
+        byte[] mac = new byte[32]; Buffer.BlockCopy(f, len - 32, mac, 0, 32);
+        if (!NsCrypto.Equal(mac, NsCrypto.Hmac(rMac, NsCrypto.Seq(rSeq), iv, ct))) throw new IOException("bad frame signature");
+        using (Aes aes = Aes.Create()) {
+            aes.Mode = CipherMode.CBC; aes.Padding = PaddingMode.PKCS7;
+            using (ICryptoTransform t = aes.CreateDecryptor(rEnc, iv)) { rbuf = t.TransformFinalBlock(ct, 0, ct.Length); }
+        }
+        rpos = 0; rSeq++;
+        return true;
+    }
+}
+//CS-END
+'@
+Add-Type -ReferencedAssemblies System.Core -TypeDefinition $NsCryptoSource
 $script:Quit = $false
 
 $Port = 47800
-# The phone's pairing code is remembered here after it works once.
+# After the first pairing the PC keeps a secret key (locked to this Windows user) instead of the code.
 $CodeDir = Join-Path $env:APPDATA "NightSend"
-$CodeFile = Join-Path $CodeDir "pairing-code.txt"
+$KeyFile = Join-Path $CodeDir "pairing-key.dat"
 try { [void](New-Item -ItemType Directory -Force -Path $CodeDir) } catch {}
-$SavedCode = ""
-try { if (Test-Path -LiteralPath $CodeFile) { $SavedCode = ([IO.File]::ReadAllText($CodeFile)).Trim() } } catch {}
+$script:PairKey = $null
+try {
+    if (Test-Path -LiteralPath $KeyFile) {
+        $script:PairKey = [Security.Cryptography.ProtectedData]::Unprotect([IO.File]::ReadAllBytes($KeyFile), $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)
+    }
+} catch { $script:PairKey = $null }
+function Save-PairKey($key) {
+    $script:PairKey = $key
+    try { [IO.File]::WriteAllBytes($KeyFile, [Security.Cryptography.ProtectedData]::Protect($key, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)) } catch {}
+}
+function Forget-PairKey { $script:PairKey = $null; try { Remove-Item -LiteralPath $KeyFile -Force -ErrorAction SilentlyContinue } catch {} }
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Tcp = $null; $script:Ns = $null; $script:Rd = $null
 $script:PhoneIp = $null; $script:PhoneFree = -1; $script:PhonePath = ""; $script:PhoneRoot = ""; $script:DestPath = ""
@@ -92,11 +382,23 @@ function Open-Conn([string]$ip) {
 
 function Say-Hello {
     $code = ($txtCode.Text -replace "\D", "")
-    if ($code.Length -ne 6) { throw "Type the 6-digit pairing code shown on the phone." }
-    Send-Line ("PAIR " + $code)
-    $ok = $script:Rd.ReadLine()
-    if ($ok -ne "OK") { throw "Wrong pairing code. Check the code on the phone screen and type it again." }
-    try { [IO.File]::WriteAllText($CodeFile, $code) } catch {}
+    if (-not $script:PairKey -and $code.Length -ne 6) { throw "Type the 6-digit pairing code shown on the phone (needed once)." }
+    $newKey = $null
+    try {
+        $sec = [NsCrypto]::ClientHandshake($script:Ns, $code, $script:PairKey, [ref]$newKey)
+    } catch {
+        $e = $_.Exception
+        while ($e.InnerException) { $e = $e.InnerException }
+        if ($e -is [NsAuthException]) {
+            if ($e.Reply -eq "ERR auth") { Forget-PairKey; throw "The phone does not know this PC any more. Type the pairing code shown on the phone and press Find phone." }
+            if ($e.Reply -eq "ERR code") { throw "Wrong pairing code. Check the code on the phone screen and type it again." }
+            throw "The phone has an older NightSend. Install the newest NightSend.apk from Releases."
+        }
+        throw $e.Message
+    }
+    $script:Ns = $sec
+    $script:Rd = New-Object IO.StreamReader($sec, $Utf8)
+    if ($newKey -and (-not $script:PairKey -or -not [NsCrypto]::Equal([byte[]]$newKey, [byte[]]$script:PairKey))) { Save-PairKey $newKey }
     Send-Line "HELLO"
     $r = $script:Rd.ReadLine()
     if (-not $r -or -not $r.StartsWith("NIGHTSEND|")) { throw "Not a NightSend phone." }
@@ -587,7 +889,7 @@ $btnFind = B "Find phone" 20 126 150
 [void](L "Address (auto):" 182 132 64 22 $null $cDim)
 $txtIp = T "" 248 129 150
 [void](L "Code:" 410 132 44 22 $null $cDim)
-$txtCode = T $SavedCode 456 129 90
+$txtCode = T "" 456 129 90
 $txtCode.MaxLength = 7
 [void](L "(from phone)" 552 132 150 22 $null $cDim)
 $lblPhone = L "Not connected." 20 164 680 40 $null $cDim
@@ -673,7 +975,7 @@ $form.Add_FormClosing({
     $tray.Visible = $false; $tray.Dispose()
 })
 $form.Add_Shown({ Log "NightSend ready. Put the phone and this PC on the same Wi-Fi, open NightSend on the phone and type its pairing code here."
-    if ($SavedCode.Length -eq 6) { Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false }
+    if ($script:PairKey) { Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false }
 })
 
 # Application.Run (not ShowDialog): hiding the window to the tray must never end the program.

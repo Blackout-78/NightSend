@@ -18,10 +18,16 @@ These are design previews. The finished app follows this look.
   </tr>
 </table>
 
-## Pairing code (v0.3)
-The phone app shows a 6-digit pairing code. Type it into the **Code** box in the PC app once; the PC remembers it.
-Without the right code the phone answers nothing: no file list, no saving. 5 wrong codes in a row make a new code.
-Tap "make a new code" on the phone any time to lock out every PC until the new code is typed in.
+## Pairing and encryption (v2)
+The phone app shows a 6-digit pairing code. Type it into the **Code** box in the PC app **once**.
+- The code is never sent. PC and phone prove they know it, and swap fresh one-time keys (ECDH P-256) for every connection.
+- Everything after that (commands, file names, file data) is encrypted and signed (AES-256 + HMAC-SHA256). Anyone watching the Wi-Fi sees nothing readable and cannot change or replay anything.
+- After the first pairing the PC keeps a secret key (locked to your Windows user) and the phone makes a new code. From then on the PC reconnects by itself, with no code.
+- Pairing another PC needs the new code shown on the phone.
+- Without the right code or key the phone answers nothing. 5 wrong codes in a row make a new code.
+- Tap "forget all paired PCs and make a new code" on the phone to lock out every PC.
+- The one weak spot is the very first pairing: pair at home, not while a stranger is on the same Wi-Fi.
+- The phone app and the PC app must both be v2. The build publishes them together.
 
 ## Background
 - Phone: NightSend receives in the background (foreground service, notification). Pick the save folder with **Choose folder**.

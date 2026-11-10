@@ -9,7 +9,18 @@ permissions:
   contents: write
 
 jobs:
+  crypto-selftest:
+    # Compiles the PC crypto the same way the app does and runs a full encrypted handshake over loopback.
+    # If this fails nothing is published, so the APK and the exe can never get out of step.
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - name: PC crypto self-test (Windows PowerShell 5.1)
+        shell: powershell
+        run: ./pc/selftest.ps1
+
   build:
+    needs: crypto-selftest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
@@ -55,7 +66,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module ps2exe -Scope CurrentUser -Force
-          Invoke-ps2exe -inputFile pc/NightSend.ps1 -outputFile NightSend.exe -noConsole -STA -title "NightSend" -product "NightSend" -version "1.0.0.0"
+          Invoke-ps2exe -inputFile pc/NightSend.ps1 -outputFile NightSend.exe -noConsole -STA -title "NightSend" -product "NightSend" -version "2.0.0.0"
           if (-not (Test-Path NightSend.exe)) { throw "exe not built" }
 
       - name: Publish release
