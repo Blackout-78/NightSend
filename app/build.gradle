@@ -10,8 +10,8 @@ android {
         applicationId 'com.blackout.nightsend'
         minSdk 26
         targetSdk 34
-        versionCode 6
-        versionName '0.6'
+        versionCode 7
+        versionName '0.7'
     }
 
     signingConfigs {
@@ -39,4 +39,9 @@ android {
         checkReleaseBuilds false
         abortOnError false
     }
+}
+
+dependencies {
+    // QR code reader (pure Java, runs offline on the phone; nothing is sent anywhere)
+    implementation 'com.google.zxing:core:3.5.3'
 }

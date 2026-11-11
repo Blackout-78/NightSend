@@ -57,6 +57,7 @@ public class MainActivity extends Activity {
     TextView statusView, addrView, progressView, storageView, codeView, folderView;
     Button grantButton;
     SharedPreferences prefs;
+    static final int REQ_SCAN = 7;
 
     // ---------------------------------------------------------------- UI
 
@@ -69,7 +70,6 @@ public class MainActivity extends Activity {
         getWindow().setStatusBarColor(BG);
         getWindow().setNavigationBarColor(BG);
         prefs = TransferService.prefs(this);
-        TransferService.ensureCode(this);
         loadVolumes();
 
         LinearLayout root = new LinearLayout(this);
@@ -82,7 +82,7 @@ public class MainActivity extends Activity {
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         title.setLetterSpacing(0.12f);
         root.addView(title);
-        root.addView(text("Same Wi-Fi  -  just type the code  -  no cloud", 14, DIM));
+        root.addView(text("Pair once with a QR code  -  no cloud", 14, DIM));
 
         View line = new View(this);
         line.setBackgroundColor(ACCENT);
@@ -96,16 +96,30 @@ public class MainActivity extends Activity {
         progressView = text("", 15, DIM);
         root.addView(progressView);
 
-        root.addView(header("PAIRING CODE (needed once per PC)"));
-        codeView = text("", 34, TEXT);
-        codeView.setTypeface(Typeface.MONOSPACE, Typeface.BOLD);
-        codeView.setLetterSpacing(0.15f);
+        root.addView(header("PAIR A NEW PC (once per PC)"));
+        codeView = text("", 16, TEXT);
         root.addView(codeView);
-        TextView newCodeBtn = text("Tap here to forget all paired PCs and make a new code", 13, ACCENT);
-        newCodeBtn.setOnClickListener(v -> {
-            TransferService.forgetAll(this);
-            TransferService.status = "All PCs forgotten. New code made. Type it into the PC app.";
-        });
+        Button scanButton = new Button(this);
+        scanButton.setText("Scan the PC's QR code");
+        scanButton.setTextColor(Color.WHITE);
+        scanButton.setBackgroundColor(ACCENT);
+        scanButton.setOnClickListener(v -> startActivityForResult(new Intent(this, QrScanActivity.class), REQ_SCAN));
+        LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        sp.setMargins(0, dp(8), 0, 0);
+        root.addView(scanButton, sp);
+        TextView typeBtn = text("No camera? Type the code instead", 13, ACCENT);
+        typeBtn.setOnClickListener(v -> typeCode());
+        root.addView(typeBtn);
+        TextView newCodeBtn = text("Tap here to forget all paired PCs", 13, ACCENT);
+        newCodeBtn.setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Forget all paired PCs?")
+                .setMessage("Every PC will need to be paired again with a new QR code.")
+                .setPositiveButton("Forget all", (d, w) -> {
+                    TransferService.forgetAll(this);
+                    TransferService.status = "All PCs forgotten. Pair again with the PC's QR code.";
+                })
+                .setNegativeButton("Cancel", null)
+                .show());
         root.addView(newCodeBtn);
 
         root.addView(header("PHONE ADDRESS (the PC finds it by itself)"));
@@ -139,8 +153,9 @@ public class MainActivity extends Activity {
 
         root.addView(header("HOW TO CONNECT"));
         root.addView(text(
-                "1. Join the same Wi-Fi as the PC.\n" +
-                "2. Open NightSend on the PC and type the code above.\n" +
+                "1. Connect the phone and PC: USB cable (USB tethering), the phone's hotspot / Wi-Fi Direct, or the same Wi-Fi.\n" +
+                "2. On the PC press Pair with QR. Here tap Scan the PC's QR code and point the camera at it.\n" +
+                "3. On the PC press Find phone.\n" +
                 "NightSend keeps receiving in the background, even with the screen off or this app closed. " +
                 "Stop it from the notification.", 14, DIM));
 
@@ -156,6 +171,31 @@ public class MainActivity extends Activity {
         startReceiver();
         updateDest();
         ui.post(refresher);
+    }
+
+    @Override
+    protected void onActivityResult(int req, int result, Intent data) {
+        super.onActivityResult(req, result, data);
+        if (req == REQ_SCAN && result == RESULT_OK && data != null) {
+            if (!TransferService.armPairing(data.getStringExtra("qr")))
+                TransferService.status = "That QR code is not a NightSend pairing code.";
+        }
+    }
+
+    /** Fallback when the camera cannot be used: type the code shown under the PC's QR picture. */
+    void typeCode() {
+        EditText e = new EditText(this);
+        e.setSingleLine(true);
+        e.setHint("32 letters and numbers");
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Code from the PC")
+                .setView(e)
+                .setPositiveButton("Pair", (d, w) -> {
+                    if (!TransferService.armPairing(e.getText().toString()))
+                        TransferService.status = "That is not a valid pairing code (32 letters and numbers).";
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
     }
 
     void startReceiver() {
@@ -191,8 +231,14 @@ public class MainActivity extends Activity {
                 progressView.setText("");
             }
             addrView.setText(addresses());
-            String c = TransferService.pairCode;
-            if (c != null && c.length() == 6) codeView.setText(c.substring(0, 3) + " " + c.substring(3));
+            long left = (TransferService.pairExpires - System.currentTimeMillis()) / 1000;
+            if (TransferService.pairSecret != null && left > 0) {
+                codeView.setText("Ready to pair: " + left + " s left. Press Find phone on the PC.");
+                codeView.setTextColor(GOOD);
+            } else {
+                codeView.setText("Not pairing. Saved PCs reconnect by themselves.");
+                codeView.setTextColor(DIM);
+            }
             ui.postDelayed(this, 700);
         }
     };

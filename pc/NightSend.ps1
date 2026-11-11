@@ -1,6 +1,6 @@
-# NightSend PC (v2.0 - encrypted + same Wi-Fi + pairing code + tray + keeps folders / auto-sort / pick the phone folder + no freezing + auto-reconnect)
+# NightSend PC (v3.0 - encrypted + QR pairing + tray + keeps folders / auto-sort / pick the phone folder + no freezing + auto-reconnect)
 # Sends a whole folder from this PC to the NightSend phone app.
-# Both devices on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no extra downloads.
+# Both devices on the same Wi-Fi: the PC finds the phone by itself, you pair once by scanning a QR code with the phone. No internet, no cloud, no extra downloads.
 # Skips files already on the phone, re-sends unfinished ones, phone checks every file's size.
 
 Add-Type -AssemblyName System.Windows.Forms
@@ -122,7 +122,7 @@ public static class NsCrypto {
         byte[] b = Utf8(line + "\n"); s.Write(b, 0, b.Length); s.Flush();
     }
 
-    // PC side. pairKey != null: use the saved key (AUTH). Otherwise use the 6-digit code (PAIR).
+    // PC side. pairKey != null: use the saved key (AUTH). Otherwise use the one-time 128-bit pairing secret from the QR code (PAIR).
     public static SecureStream ClientHandshake(Stream raw, string code, byte[] pairKey, out byte[] newPairKey) {
         newPairKey = null;
         ECDiffieHellmanCng k = NewKey();
@@ -181,11 +181,12 @@ public static class NsCrypto {
     }
 
     public static string SelfTest() {
+        if (NsQr.Check() != "ab58fb4308d7ab7a050645c269e34e918ef4a81b4a5477d5a9ac6e052257cd0a") return "FAIL: QR code picture is not what the reference makes";
         TcpListener l = new TcpListener(IPAddress.Loopback, 0); l.Start();
         int port = ((IPEndPoint)l.LocalEndpoint).Port;
         string error = null; byte[] stored = null;
         Thread th = new Thread(delegate() {
-            try { for (int i = 0; i < 3; i++) { using (TcpClient c = l.AcceptTcpClient()) { ServerRound(c, "123456", ref stored); } } }
+            try { for (int i = 0; i < 3; i++) { using (TcpClient c = l.AcceptTcpClient()) { ServerRound(c, "0123456789abcdef0123456789abcdef", ref stored); } } }
             catch (Exception e) { error = "server: " + e.ToString(); }
         });
         th.Start();
@@ -193,13 +194,13 @@ public static class NsCrypto {
             byte[] np;
             // 1: wrong code is refused
             using (TcpClient c = new TcpClient("127.0.0.1", port)) {
-                try { ClientHandshake(c.GetStream(), "000000", null, out np); return "FAIL: wrong code was accepted"; }
+                try { ClientHandshake(c.GetStream(), "00000000000000000000000000000000", null, out np); return "FAIL: wrong code was accepted"; }
                 catch (NsAuthException e) { if (e.Reply != "ERR code") return "FAIL: " + e.Reply; }
             }
             // 2: pair with the code, send 1 MB, check the phone saw the same bytes
             byte[] key = null; byte[] data = new byte[1000000]; new Random(7).NextBytes(data);
             using (TcpClient c = new TcpClient("127.0.0.1", port)) {
-                SecureStream s = ClientHandshake(c.GetStream(), "123456", null, out key);
+                SecureStream s = ClientHandshake(c.GetStream(), "0123456789abcdef0123456789abcdef", null, out key);
                 WriteLine(s, "HELLO"); s.Write(data, 0, data.Length); s.Flush();
                 if (ReadLine(s) != "ECHO HELLO " + Hex(Sha256(data))) return "FAIL: pair round data mismatch";
             }
@@ -302,6 +303,201 @@ public class SecureStream : Stream {
         return true;
     }
 }
+// QR code for pairing: version 3, error correction M, byte mode, up to 42 bytes. Checked at build time.
+public static class NsQr {
+    const int N = 29, DATA = 44, EC = 26;
+    static int[] EXP = new int[512];
+    static int[] LOG = new int[256];
+    static NsQr() {
+        int x = 1;
+        for (int i = 0; i < 255; i++) { EXP[i] = x; LOG[x] = i; x <<= 1; if ((x & 0x100) != 0) x ^= 0x11D; }
+        for (int i = 255; i < 512; i++) EXP[i] = EXP[i - 255];
+    }
+    static int GMul(int a, int b) { if (a == 0 || b == 0) return 0; return EXP[LOG[a] + LOG[b]]; }
+    static int[] Generator(int deg) {
+        int[] g = new int[] { 1 };
+        for (int i = 0; i < deg; i++) {
+            int[] ng = new int[g.Length + 1];
+            for (int j = 0; j < g.Length; j++) { ng[j] ^= g[j]; ng[j + 1] ^= GMul(g[j], EXP[i]); }
+            g = ng;
+        }
+        return g;
+    }
+    static int[] Remainder(int[] data, int deg) {
+        int[] g = Generator(deg);
+        int[] res = new int[data.Length + deg];
+        Array.Copy(data, 0, res, 0, data.Length);
+        for (int i = 0; i < data.Length; i++) {
+            int c = res[i];
+            if (c != 0) for (int j = 1; j < g.Length; j++) res[i + j] ^= GMul(g[j], c);
+        }
+        int[] r = new int[deg];
+        Array.Copy(res, data.Length, r, 0, deg);
+        return r;
+    }
+    static void Put(System.Collections.Generic.List<int> bits, int v, int n) { for (int i = n - 1; i >= 0; i--) bits.Add((v >> i) & 1); }
+    static int[] Codewords(byte[] p) {
+        if (p.Length > 42) throw new ArgumentException("payload too long");
+        System.Collections.Generic.List<int> bits = new System.Collections.Generic.List<int>();
+        Put(bits, 4, 4);
+        Put(bits, p.Length, 8);
+        for (int i = 0; i < p.Length; i++) Put(bits, p[i], 8);
+        int cap = DATA * 8;
+        Put(bits, 0, Math.Min(4, cap - bits.Count));
+        while (bits.Count % 8 != 0) bits.Add(0);
+        int[] all = new int[DATA + EC];
+        int n = 0;
+        for (int i = 0; i < bits.Count; i += 8) {
+            int v = 0;
+            for (int j = 0; j < 8; j++) v = (v << 1) | bits[i + j];
+            all[n++] = v;
+        }
+        int k = 0;
+        while (n < DATA) { all[n++] = (k % 2 == 0) ? 0xEC : 0x11; k++; }
+        int[] data = new int[DATA];
+        Array.Copy(all, 0, data, 0, DATA);
+        int[] ec = Remainder(data, EC);
+        Array.Copy(ec, 0, all, DATA, EC);
+        return all;
+    }
+    static void SetF(bool[,] m, bool[,] f, int r, int c, bool v) { m[r, c] = v; f[r, c] = true; }
+    static void Blank(bool[,] m, bool[,] f) {
+        int[][] corners = new int[][] { new int[] { 0, 0 }, new int[] { 0, N - 7 }, new int[] { N - 7, 0 } };
+        foreach (int[] co in corners) {
+            for (int dr = -1; dr <= 7; dr++) for (int dc = -1; dc <= 7; dc++) {
+                int r = co[0] + dr, c = co[1] + dc;
+                if (r >= 0 && r < N && c >= 0 && c < N) {
+                    bool inside = dr >= 0 && dr <= 6 && dc >= 0 && dc <= 6;
+                    bool dark = inside && (dr == 0 || dr == 6 || dc == 0 || dc == 6 || (dr >= 2 && dr <= 4 && dc >= 2 && dc <= 4));
+                    SetF(m, f, r, c, dark);
+                }
+            }
+        }
+        for (int i = 8; i < N - 8; i++) { SetF(m, f, 6, i, i % 2 == 0); SetF(m, f, i, 6, i % 2 == 0); }
+        for (int dr = -2; dr <= 2; dr++) for (int dc = -2; dc <= 2; dc++)
+            SetF(m, f, 22 + dr, 22 + dc, Math.Max(Math.Abs(dr), Math.Abs(dc)) != 1);
+        for (int i = 0; i < 9; i++) { f[8, i] = true; f[i, 8] = true; }
+        for (int i = 0; i < 8; i++) { f[8, N - 1 - i] = true; f[N - 1 - i, 8] = true; }
+        SetF(m, f, N - 8, 8, true);
+    }
+    static void PlaceData(bool[,] m, bool[,] f, int[] cws) {
+        int total = cws.Length * 8 + 7;
+        int[] bits = new int[total];
+        int n = 0;
+        foreach (int cw in cws) for (int i = 7; i >= 0; i--) bits[n++] = (cw >> i) & 1;
+        int idx = 0;
+        int c = N - 1;
+        bool up = true;
+        while (c > 0) {
+            if (c == 6) c--;
+            for (int k = 0; k < N; k++) {
+                int r = up ? N - 1 - k : k;
+                for (int d = 0; d < 2; d++) {
+                    int cc = c - d;
+                    if (!f[r, cc]) { m[r, cc] = idx < total && bits[idx] == 1; idx++; }
+                }
+            }
+            up = !up;
+            c -= 2;
+        }
+    }
+    static bool MaskBit(int mask, int r, int c) {
+        switch (mask) {
+            case 0: return (r + c) % 2 == 0;
+            case 1: return r % 2 == 0;
+            case 2: return c % 3 == 0;
+            case 3: return (r + c) % 3 == 0;
+            case 4: return (r / 2 + c / 3) % 2 == 0;
+            case 5: return (r * c) % 2 + (r * c) % 3 == 0;
+            case 6: return ((r * c) % 2 + (r * c) % 3) % 2 == 0;
+            default: return ((r + c) % 2 + (r * c) % 3) % 2 == 0;
+        }
+    }
+    static bool[,] ApplyMask(bool[,] m, bool[,] f, int mask) {
+        bool[,] o = new bool[N, N];
+        for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) {
+            o[r, c] = m[r, c];
+            if (!f[r, c] && MaskBit(mask, r, c)) o[r, c] = !o[r, c];
+        }
+        return o;
+    }
+    static int FormatBits(int mask) {
+        int data = mask;
+        int rem = data;
+        for (int i = 0; i < 10; i++) rem = (rem << 1) ^ ((rem >> 9) * 0x537);
+        return ((data << 10) | rem) ^ 0x5412;
+    }
+    static bool FBit(int bits, int i) { return ((bits >> i) & 1) != 0; }
+    static void DrawFormat(bool[,] m, int mask) {
+        int bits = FormatBits(mask);
+        for (int i = 0; i < 6; i++) m[i, 8] = FBit(bits, i);
+        m[7, 8] = FBit(bits, 6); m[8, 8] = FBit(bits, 7); m[8, 7] = FBit(bits, 8);
+        for (int i = 9; i < 15; i++) m[8, 14 - i] = FBit(bits, i);
+        for (int i = 0; i < 8; i++) m[8, N - 1 - i] = FBit(bits, i);
+        for (int i = 8; i < 15; i++) m[N - 15 + i, 8] = FBit(bits, i);
+        m[N - 8, 8] = true;
+    }
+    static bool[] PAT1 = new bool[] { true, false, true, true, true, false, true, false, false, false, false };
+    static bool[] PAT2 = new bool[] { false, false, false, false, true, false, true, true, true, false, true };
+    static int Penalty(bool[,] m) {
+        int s = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            for (int a = 0; a < N; a++) {
+                bool[] line = new bool[N];
+                for (int b = 0; b < N; b++) line[b] = pass == 0 ? m[a, b] : m[b, a];
+                int run = 1;
+                for (int i = 1; i < N; i++) {
+                    if (line[i] == line[i - 1]) run++;
+                    else { if (run >= 5) s += 3 + (run - 5); run = 1; }
+                }
+                if (run >= 5) s += 3 + (run - 5);
+                for (int i = 0; i + 11 <= N; i++) {
+                    bool e1 = true, e2 = true;
+                    for (int j = 0; j < 11; j++) { if (line[i + j] != PAT1[j]) e1 = false; if (line[i + j] != PAT2[j]) e2 = false; }
+                    if (e1 || e2) s += 40;
+                }
+            }
+        }
+        for (int r = 0; r < N - 1; r++) for (int c = 0; c < N - 1; c++)
+            if (m[r, c] == m[r, c + 1] && m[r, c] == m[r + 1, c] && m[r, c] == m[r + 1, c + 1]) s += 3;
+        int dark = 0;
+        for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) if (m[r, c]) dark++;
+        int total = N * N;
+        int k = (Math.Abs(dark * 20 - total * 10) + total - 1) / total - 1;
+        s += k * 10;
+        return s;
+    }
+    // Returns the 29 x 29 module grid (true = dark). No quiet zone.
+    public static bool[,] Encode(byte[] payload) {
+        bool[,] m = new bool[N, N];
+        bool[,] f = new bool[N, N];
+        Blank(m, f);
+        PlaceData(m, f, Codewords(payload));
+        bool[,] best = null; int bestP = 0;
+        for (int mask = 0; mask < 8; mask++) {
+            bool[,] t = ApplyMask(m, f, mask);
+            DrawFormat(t, mask);
+            int p = Penalty(t);
+            if (best == null || p < bestP) { best = t; bestP = p; }
+        }
+        return best;
+    }
+    // Used by the build self-test: a fixed text must always give exactly this picture.
+    public static string Check() {
+        bool[,] m = Encode(Encoding.UTF8.GetBytes("NS3:00112233445566778899aabbccddeeff"));
+        StringBuilder sb = new StringBuilder();
+        for (int r = 0; r < N; r++) {
+            if (r > 0) sb.Append('\n');
+            for (int c = 0; c < N; c++) sb.Append(m[r, c] ? '1' : '0');
+        }
+        using (SHA256 h = SHA256.Create()) {
+            byte[] d = h.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
+            StringBuilder o = new StringBuilder();
+            foreach (byte b in d) o.Append(b.ToString("x2"));
+            return o.ToString();
+        }
+    }
+}
 //CS-END
 '@
 Add-Type -ReferencedAssemblies System.Core -TypeDefinition $NsCryptoSource
@@ -321,6 +517,12 @@ try {
 function Save-PairKey($key) {
     $script:PairKey = $key
     try { [IO.File]::WriteAllBytes($KeyFile, [Security.Cryptography.ProtectedData]::Protect($key, $null, [Security.Cryptography.DataProtectionScope]::CurrentUser)) } catch {}
+}
+$script:PairSecret = $null; $script:PairSecretAt = $null
+function New-PairSecret {
+    $b = New-Object byte[] 16
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($b); $rng.Dispose()
+    (($b | ForEach-Object { $_.ToString("x2") }) -join "")
 }
 function Forget-PairKey { $script:PairKey = $null; try { Remove-Item -LiteralPath $KeyFile -Force -ErrorAction SilentlyContinue } catch {} }
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
@@ -381,23 +583,27 @@ function Open-Conn([string]$ip) {
 }
 
 function Say-Hello {
-    $code = ($txtCode.Text -replace "\D", "")
-    if (-not $script:PairKey -and $code.Length -ne 6) { throw "Type the 6-digit pairing code shown on the phone (needed once)." }
+    if ($script:PairSecret -and ((Get-Date) - $script:PairSecretAt).TotalMinutes -gt 10) { $script:PairSecret = $null }
+    $code = $script:PairSecret
+    if (-not $script:PairKey -and -not $code) { throw "Press 'Pair with QR', scan the picture with the NightSend phone app, then press Find phone." }
+    $useKey = $script:PairKey
+    if ($code) { $useKey = $null }   # a fresh QR pairing always wins over an old saved key
     $newKey = $null
     try {
-        $sec = [NsCrypto]::ClientHandshake($script:Ns, $code, $script:PairKey, [ref]$newKey)
+        $sec = [NsCrypto]::ClientHandshake($script:Ns, $code, $useKey, [ref]$newKey)
     } catch {
         $e = $_.Exception
         while ($e.InnerException) { $e = $e.InnerException }
         if ($e -is [NsAuthException]) {
-            if ($e.Reply -eq "ERR auth") { Forget-PairKey; throw "The phone does not know this PC any more. Type the pairing code shown on the phone and press Find phone." }
-            if ($e.Reply -eq "ERR code") { throw "Wrong pairing code. Check the code on the phone screen and type it again." }
+            if ($e.Reply -eq "ERR auth") { throw "The phone does not know this PC (it may have been forgotten, or this is not your phone). Press 'Pair with QR' to pair again." }
+            if ($e.Reply -eq "ERR code") { $script:PairSecret = $null; throw "The phone did not accept the pairing. On the phone tap 'Scan the PC's QR code' first, then press Find phone. If it still fails press 'Pair with QR' again for a new picture." }
             throw "The phone has an older NightSend. Install the newest NightSend.apk from Releases."
         }
         throw $e.Message
     }
     $script:Ns = $sec
     $script:Rd = New-Object IO.StreamReader($sec, $Utf8)
+    $script:PairSecret = $null   # the QR secret works once
     if ($newKey -and (-not $script:PairKey -or -not [NsCrypto]::Equal([byte[]]$newKey, [byte[]]$script:PairKey))) { Save-PairKey $newKey }
     Send-Line "HELLO"
     $r = $script:Rd.ReadLine()
@@ -851,6 +1057,47 @@ function Pick-PhoneFolder {
     }
 }
 
+# ---------- pairing QR ----------
+function Show-PairQr {
+    $script:PairSecret = New-PairSecret
+    $script:PairSecretAt = Get-Date
+    $mods = [NsQr]::Encode($Utf8.GetBytes("NS3:" + $script:PairSecret))
+    $scale = 9; $quiet = 4; $n = 29
+    $px = ($n + 2 * $quiet) * $scale
+    $bmp = New-Object Drawing.Bitmap($px, $px)
+    $g = [Drawing.Graphics]::FromImage($bmp)
+    $g.Clear([Drawing.Color]::White)
+    $black = New-Object Drawing.SolidBrush([Drawing.Color]::Black)
+    for ($r = 0; $r -lt $n; $r++) { for ($c = 0; $c -lt $n; $c++) {
+        if ($mods[$r, $c]) { $g.FillRectangle($black, ($c + $quiet) * $scale, ($r + $quiet) * $scale, $scale, $scale) }
+    } }
+    $black.Dispose(); $g.Dispose()
+    $dlg = New-Object Windows.Forms.Form
+    $dlg.Text = "Pair with the phone"; $dlg.ClientSize = New-Object Drawing.Size(380, ($px + 150))
+    $dlg.BackColor = $cBg; $dlg.ForeColor = $cText; $dlg.Font = $fUi
+    $dlg.FormBorderStyle = "FixedDialog"; $dlg.MaximizeBox = $false; $dlg.MinimizeBox = $false
+    $dlg.StartPosition = "CenterParent"
+    $pb = New-Object Windows.Forms.PictureBox
+    $pb.Image = $bmp; $pb.SizeMode = "Zoom"
+    $pb.Location = New-Object Drawing.Point(([int]((380 - $px) / 2)), 12); $pb.Size = New-Object Drawing.Size($px, $px)
+    $dlg.Controls.Add($pb)
+    $help = New-Object Windows.Forms.Label
+    $help.Text = "On the phone open NightSend and tap 'Scan the PC's QR code', then point the camera at this picture. Then come back and press Find phone. This picture works once."
+    $help.Location = New-Object Drawing.Point(16, ($px + 20)); $help.Size = New-Object Drawing.Size(348, 60); $help.ForeColor = $cText
+    $dlg.Controls.Add($help)
+    $grp = ($script:PairSecret -replace "(.{4})(?=.)", '$1 ')
+    $txt = New-Object Windows.Forms.Label
+    $txt.Text = "No camera? On the phone choose 'Type the code instead':`n" + $grp
+    $txt.Location = New-Object Drawing.Point(16, ($px + 84)); $txt.Size = New-Object Drawing.Size(348, 44); $txt.ForeColor = $cDim
+    $txt.Font = New-Object Drawing.Font("Consolas", 9)
+    $dlg.Controls.Add($txt)
+    $ok = New-Object Windows.Forms.Button
+    $ok.Text = "Done"; $ok.Location = New-Object Drawing.Point(140, ($px + 112)); $ok.Size = New-Object Drawing.Size(100, 28)
+    $ok.FlatStyle = "Flat"; $ok.BackColor = $cPanel; $ok.ForeColor = $cText; $ok.FlatAppearance.BorderColor = $cAccent
+    $ok.DialogResult = "OK"; $dlg.AcceptButton = $ok; $dlg.Controls.Add($ok)
+    try { [void]$dlg.ShowDialog($form) } finally { $pb.Image = $null; $bmp.Dispose(); $dlg.Dispose() }
+}
+
 # ---------- UI ----------
 $form = New-Object Windows.Forms.Form
 $form.Text = "NightSend"
@@ -880,7 +1127,7 @@ function T($text, $x, $y, $w) {
 }
 
 [void](L "NIGHTSEND" 20 14 400 44 (New-Object Drawing.Font("Segoe UI Black", 24)) $cText)
-[void](L "Same Wi-Fi  -  just type the code  -  no cloud, no internet" 22 58 660 22 $null $cDim)
+[void](L "Pair once with a QR code  -  no cloud, no internet" 22 58 660 22 $null $cDim)
 $line = New-Object Windows.Forms.Panel; $line.BackColor = $cAccent
 $line.Location = New-Object Drawing.Point(20, 86); $line.Size = New-Object Drawing.Size(680, 2); $form.Controls.Add($line)
 
@@ -888,10 +1135,8 @@ $line.Location = New-Object Drawing.Point(20, 86); $line.Size = New-Object Drawi
 $btnFind = B "Find phone" 20 126 150
 [void](L "Address (auto):" 182 132 64 22 $null $cDim)
 $txtIp = T "" 248 129 150
-[void](L "Code:" 410 132 44 22 $null $cDim)
-$txtCode = T "" 456 129 90
-$txtCode.MaxLength = 7
-[void](L "(from phone)" 552 132 150 22 $null $cDim)
+$btnPair = B "Pair with QR" 410 126 150
+[void](L "(once per phone)" 568 132 130 22 $null $cDim)
 $lblPhone = L "Not connected." 20 164 680 40 $null $cDim
 
 [void](L "2  SEND FROM (this PC)" 20 210 300 22 $fBold $cDim)
@@ -932,6 +1177,7 @@ $timer.Interval = 20
 $timer.Add_Tick({ On-Tick })
 
 $btnFind.Add_Click({ Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false })
+$btnPair.Add_Click({ Show-PairQr })
 $btnSend.Add_Click({ Start-Send })
 $btnPick.Add_Click({ Pick-PhoneFolder })
 $btnStop.Add_Click({ Abort-Send "Stopped by you." })
@@ -974,7 +1220,7 @@ $form.Add_FormClosing({
     }
     $tray.Visible = $false; $tray.Dispose()
 })
-$form.Add_Shown({ Log "NightSend ready. Put the phone and this PC on the same Wi-Fi, open NightSend on the phone and type its pairing code here."
+$form.Add_Shown({ Log "NightSend ready. First time: press Pair with QR, scan the picture with the NightSend phone app, then press Find phone."
     if ($script:PairKey) { Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false }
 })
 

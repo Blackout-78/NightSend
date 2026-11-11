@@ -1,7 +1,7 @@
 # NightSend
 
 Private direct file transfer from a Windows PC to an Android phone.
-Both on the same Wi-Fi: the PC finds the phone by itself, you only type the code. No internet, no cloud, no relay.
+The PC finds the phone by itself; you pair once by scanning a QR code. No internet, no cloud, no relay.
 
 - `app/` - Android receiver app (APK built automatically by GitHub Actions, see Releases)
 - PC sender: `NightSend.exe` (see Releases), or `pc/NightSend.bat` + `pc/NightSend.ps1` (Windows 10/11, nothing to install)
@@ -18,16 +18,20 @@ These are design previews. The finished app follows this look.
   </tr>
 </table>
 
-## Pairing and encryption (v2)
-The phone app shows a 6-digit pairing code. Type it into the **Code** box in the PC app **once**.
-- The code is never sent. PC and phone prove they know it, and swap fresh one-time keys (ECDH P-256) for every connection.
+## Pairing and encryption (v3)
+Pair once per PC with a QR code:
+1. On the PC press **Pair with QR**. A one-time QR code appears (a random 128-bit secret made on the PC).
+2. On the phone tap **Scan the PC's QR code** and point the camera at the PC screen. (No camera? Choose **Type the code instead** and type the code shown under the picture.)
+3. On the PC press **Find phone**.
+
+- The secret is never sent. PC and phone prove they know it, and swap fresh one-time keys (ECDH P-256) for every connection. It is 128 bits, so it cannot be guessed, even by someone on the same Wi-Fi.
+- It works once and only for 2 minutes after the phone scans it. 3 wrong tries close the pairing window. Without a scan the phone does not accept any pairing at all.
 - Everything after that (commands, file names, file data) is encrypted and signed (AES-256 + HMAC-SHA256). Anyone watching the Wi-Fi sees nothing readable and cannot change or replay anything.
-- After the first pairing the PC keeps a secret key (locked to your Windows user) and the phone makes a new code. From then on the PC reconnects by itself, with no code.
-- Pairing another PC needs the new code shown on the phone.
-- Without the right code or key the phone answers nothing. 5 wrong codes in a row make a new code.
-- Tap "forget all paired PCs and make a new code" on the phone to lock out every PC.
-- The one weak spot is the very first pairing: pair at home, not while a stranger is on the same Wi-Fi.
-- The phone app and the PC app must both be v2. The build publishes them together.
+- After pairing the PC keeps a secret key (locked to your Windows user). From then on the PC reconnects by itself, with no QR code.
+- Tap "forget all paired PCs" on the phone to lock out every PC.
+- The phone scans the picture with its camera and throws the frames away. Nothing is saved or sent anywhere.
+- Best links: a USB cable (USB tethering) or the phone's own hotspot / Wi-Fi Direct. Your home Wi-Fi works too.
+- The phone app and the PC app must both be v3. The build publishes them together.
 
 ## Background
 - Phone: NightSend receives in the background (foreground service, notification). Pick the save folder with **Choose folder**.

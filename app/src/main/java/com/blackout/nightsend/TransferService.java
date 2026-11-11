@@ -60,13 +60,15 @@ import java.util.concurrent.locks.ReentrantLock;
 public class TransferService extends Service {
 
     static final int PORT = 47800;
-    static final int MAX_WRONG = 5;        // wrong codes in a row before a new code is made
+    static final int MAX_WRONG = 3;        // wrong pairing tries before the pairing window is closed
+    static final long PAIR_WINDOW_MS = 2 * 60 * 1000;   // a scanned QR code is valid this long, once
     static final int MAX_LINE = 8192;      // longest command line accepted
     static final String CHANNEL = "nightsend";
     static final int NOTE_ID = 47800;
 
     // State shared with the screen (MainActivity only reads it).
-    static volatile String pairCode;
+    static volatile String pairSecret;     // 128-bit secret from the PC's QR code; held in memory only, works once
+    static volatile long pairExpires = 0;
     static volatile int wrongTries = 0;
     static volatile String status = "Starting...";
     static volatile String currentFile = "";
@@ -97,18 +99,23 @@ public class TransferService extends Service {
         return c.getSharedPreferences("nightsend", Context.MODE_PRIVATE);
     }
 
-    /** Loads the saved pairing code, making one the first time. */
-    static void ensureCode(Context c) {
-        if (pairCode != null) return;
-        String saved = prefs(c).getString("code", null);
-        if (saved == null) newCode(c); else pairCode = saved;
+    /**
+     * Opens a short pairing window with the secret the PC showed as a QR code (or typed by hand).
+     * Returns false if the text is not a valid pairing secret.
+     */
+    static boolean armPairing(String text) {
+        String t = text == null ? "" : text.trim();
+        if (t.startsWith("NS3:")) t = t.substring(4);
+        t = t.replace(" ", "").replace("-", "").toLowerCase(Locale.US);
+        if (!Secure.isHex(t, 32)) return false;
+        pairSecret = t;
+        pairExpires = System.currentTimeMillis() + PAIR_WINDOW_MS;
+        wrongTries = 0;
+        status = "Ready to pair. Press Find phone on the PC now (2 minutes).";
+        return true;
     }
 
-    static void newCode(Context c) {
-        pairCode = String.format(Locale.US, "%06d", RNG.nextInt(1000000));
-        wrongTries = 0;
-        prefs(c).edit().putString("code", pairCode).apply();
-    }
+    static void closePairing() { pairSecret = null; pairExpires = 0; wrongTries = 0; }
 
     static final int MAX_PCS = 8;
 
@@ -137,8 +144,8 @@ public class TransferService extends Service {
 
     /** Locks out every PC: forgets all pairings and makes a new code. */
     static synchronized void forgetAll(Context c) {
-        prefs(c).edit().remove("keys").apply();
-        newCode(c);
+        prefs(c).edit().remove("keys").remove("code").apply();
+        closePairing();
     }
 
     /** The folder on the phone where received files go. */
@@ -202,7 +209,7 @@ public class TransferService extends Service {
     public void onCreate() {
         super.onCreate();
         prefs = prefs(this);
-        ensureCode(this);
+        prefs.edit().remove("code").apply();   // the old 6-digit code no longer exists
 
         PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
         wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "nightsend:transfer");
@@ -377,19 +384,22 @@ public class TransferService extends Service {
                 proof = Secure.unhex(w[2]);
             } else if (w.length == 2 && w[0].equals("PAIR") && Secure.isHex(w[1], 64)) {
                 pairing = true;
-                k = Secure.utf8(pairCode);
+                String sec = pairSecret;
+                // Only while a scanned QR code is armed and fresh; otherwise there is nothing to pair with.
+                if (sec != null && System.currentTimeMillis() <= pairExpires) k = Secure.utf8(sec);
                 proof = Secure.unhex(w[1]);
             }
             boolean good = k != null && proof != null
                     && MessageDigest.isEqual(proof, Secure.hmac(k, Secure.utf8("NS2-C"), t));
             if (!good) {
                 if (pairing) {
-                    wrongTries++;
-                    if (wrongTries >= MAX_WRONG) {
-                        newCode(this);
-                        status = "Wrong code tried " + MAX_WRONG + " times. A new code was made.";
+                    if (k == null) {
+                        status = "A PC tried to pair, but pairing is not open. Tap \"Scan the PC's QR code\" first.";
+                    } else if (++wrongTries >= MAX_WRONG) {
+                        closePairing();
+                        status = "Wrong pairing " + MAX_WRONG + " times from " + s.getInetAddress().getHostAddress() + ". Pairing closed. Scan the QR code again.";
                     } else {
-                        status = "Wrong pairing code from " + s.getInetAddress().getHostAddress() + ". Blocked.";
+                        status = "Wrong pairing secret from " + s.getInetAddress().getHostAddress() + ". Blocked.";
                     }
                 } else {
                     status = "Unknown or forgotten PC from " + s.getInetAddress().getHostAddress() + ". Blocked.";
@@ -401,8 +411,8 @@ public class TransferService extends Service {
             send(rawOut, "OK " + Secure.hex(Secure.hmac(k, Secure.utf8("NS2-S"), t)));
             if (pairing) {
                 addKey(this, Secure.hmac(zh, Secure.utf8("NS2-PAIRKEY"), t));
-                newCode(this);   // the code was used up: the next PC needs a fresh one
-                status = "PC paired. A new code was made for the next PC.";
+                closePairing();   // the secret works once: the next PC needs its own QR code
+                status = "PC paired.";
             }
             wrongTries = 0;
             Secure.Keys keys = new Secure.Keys(Secure.hmac(k, Secure.utf8("NS2-MASTER"), zh, t));
