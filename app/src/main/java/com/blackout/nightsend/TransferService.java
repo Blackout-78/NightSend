@@ -120,7 +120,11 @@ public class TransferService extends Service {
     static final int MAX_PCS = 8;
 
     /** Paired PCs are kept as "keyId:keyHex;..." in the app's private storage. */
+    /** Strict mode: no PC is ever remembered, so every session needs a fresh QR scan. */
+    static boolean strict(Context c) { return prefs(c).getBoolean("strict", false); }
+
     static synchronized byte[] findKey(Context c, String id) {
+        if (strict(c)) return null;
         String all = prefs(c).getString("keys", "");
         for (String e : all.split(";")) {
             String[] p = e.split(":");
@@ -130,6 +134,7 @@ public class TransferService extends Service {
     }
 
     static synchronized void addKey(Context c, byte[] key) {
+        if (strict(c)) return;
         String id = Secure.keyId(key);
         StringBuilder sb = new StringBuilder();
         int n = 0;
@@ -402,7 +407,7 @@ public class TransferService extends Service {
                         status = "Wrong pairing secret from " + s.getInetAddress().getHostAddress() + ". Blocked.";
                     }
                 } else {
-                    status = "Unknown or forgotten PC from " + s.getInetAddress().getHostAddress() + ". Blocked.";
+                    status = (strict(this) ? "Strict mode: scan the PC's QR code for every session. Blocked " : "Unknown or forgotten PC from ") + s.getInetAddress().getHostAddress() + ".";
                 }
                 Thread.sleep(1000); // slows down guessing
                 send(rawOut, pairing ? "ERR code" : "ERR auth");
@@ -412,7 +417,7 @@ public class TransferService extends Service {
             if (pairing) {
                 addKey(this, Secure.hmac(zh, Secure.utf8("NS2-PAIRKEY"), t));
                 closePairing();   // the secret works once: the next PC needs its own QR code
-                status = "PC paired.";
+                status = strict(this) ? "PC connected (strict mode: scan a new QR for the next session)." : "PC paired.";
             }
             wrongTries = 0;
             Secure.Keys keys = new Secure.Keys(Secure.hmac(k, Secure.utf8("NS2-MASTER"), zh, t));

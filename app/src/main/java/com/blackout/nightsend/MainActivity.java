@@ -110,6 +110,17 @@ public class MainActivity extends Activity {
         TextView typeBtn = text("No camera? Type the code instead", 13, ACCENT);
         typeBtn.setOnClickListener(v -> typeCode());
         root.addView(typeBtn);
+        android.widget.CheckBox strictBox = new android.widget.CheckBox(this);
+        strictBox.setText("Strict mode: new QR scan for every session");
+        strictBox.setTextColor(TEXT);
+        strictBox.setChecked(TransferService.strict(this));
+        strictBox.setOnCheckedChangeListener((b, on) -> {
+            prefs.edit().putBoolean("strict", on).apply();
+            if (on) TransferService.forgetAll(this);   // nothing is remembered in strict mode
+            TransferService.status = on ? "Strict mode on. Every session needs a fresh QR scan."
+                    : "Strict mode off. A paired PC reconnects by itself.";
+        });
+        root.addView(strictBox);
         TextView newCodeBtn = text("Tap here to forget all paired PCs", 13, ACCENT);
         newCodeBtn.setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Forget all paired PCs?")

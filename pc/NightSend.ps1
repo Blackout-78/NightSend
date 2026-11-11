@@ -524,6 +524,10 @@ function New-PairSecret {
     $rng = [Security.Cryptography.RandomNumberGenerator]::Create(); $rng.GetBytes($b); $rng.Dispose()
     (($b | ForEach-Object { $_.ToString("x2") }) -join "")
 }
+$StrictFile = Join-Path $CodeDir "strict.flag"
+$script:Strict = $false
+try { $script:Strict = Test-Path -LiteralPath $StrictFile } catch {}
+if ($script:Strict) { $script:PairKey = $null }   # strict: nothing is remembered between sessions
 function Forget-PairKey { $script:PairKey = $null; try { Remove-Item -LiteralPath $KeyFile -Force -ErrorAction SilentlyContinue } catch {} }
 $Utf8 = New-Object System.Text.UTF8Encoding($false)
 $script:Tcp = $null; $script:Ns = $null; $script:Rd = $null
@@ -595,7 +599,7 @@ function Say-Hello {
         $e = $_.Exception
         while ($e.InnerException) { $e = $e.InnerException }
         if ($e -is [NsAuthException]) {
-            if ($e.Reply -eq "ERR auth") { throw "The phone does not know this PC (it may have been forgotten, or this is not your phone). Press 'Pair with QR' to pair again." }
+            if ($e.Reply -eq "ERR auth") { throw "The phone does not know this PC (forgotten, strict mode on the phone, or not your phone). Press 'Pair with QR' and scan it on the phone." }
             if ($e.Reply -eq "ERR code") { $script:PairSecret = $null; throw "The phone did not accept the pairing. On the phone tap 'Scan the PC's QR code' first, then press Find phone. If it still fails press 'Pair with QR' again for a new picture." }
             throw "The phone has an older NightSend. Install the newest NightSend.apk from Releases."
         }
@@ -604,7 +608,8 @@ function Say-Hello {
     $script:Ns = $sec
     $script:Rd = New-Object IO.StreamReader($sec, $Utf8)
     $script:PairSecret = $null   # the QR secret works once
-    if ($newKey -and (-not $script:PairKey -or -not [NsCrypto]::Equal([byte[]]$newKey, [byte[]]$script:PairKey))) { Save-PairKey $newKey }
+    # strict mode: the key is not kept, the next session needs a new QR
+    if ($script:Strict) { Forget-PairKey } elseif ($newKey -and (-not $script:PairKey -or -not [NsCrypto]::Equal([byte[]]$newKey, [byte[]]$script:PairKey))) { Save-PairKey $newKey }
     Send-Line "HELLO"
     $r = $script:Rd.ReadLine()
     if (-not $r -or -not $r.StartsWith("NIGHTSEND|")) { throw "Not a NightSend phone." }
@@ -1137,7 +1142,18 @@ $btnFind = B "Find phone" 20 126 150
 $txtIp = T "" 248 129 150
 $btnPair = B "Pair with QR" 410 126 150
 [void](L "(once per phone)" 568 132 130 22 $null $cDim)
-$lblPhone = L "Not connected." 20 164 680 40 $null $cDim
+$lblPhone = L "Not connected." 20 164 380 40 $null $cDim
+$chkStrict = New-Object Windows.Forms.CheckBox
+$chkStrict.Text = "Strict: new QR for every session"; $chkStrict.Checked = $script:Strict
+$chkStrict.Location = New-Object Drawing.Point(410, 166); $chkStrict.Size = New-Object Drawing.Size(290, 26); $chkStrict.ForeColor = $cText
+$form.Controls.Add($chkStrict)
+$chkStrict.Add_CheckedChanged({
+    $script:Strict = $chkStrict.Checked
+    try {
+        if ($script:Strict) { [IO.File]::WriteAllText($StrictFile, "1"); Forget-PairKey }
+        else { Remove-Item -LiteralPath $StrictFile -Force -ErrorAction SilentlyContinue }
+    } catch {}
+})
 
 [void](L "2  SEND FROM (this PC)" 20 210 300 22 $fBold $cDim)
 $txtSrc = T "D:\BnM\TV & Movie\TV" 20 234 560

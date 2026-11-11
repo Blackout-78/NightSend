@@ -29,6 +29,7 @@ Pair once per PC with a QR code:
 - Everything after that (commands, file names, file data) is encrypted and signed (AES-256 + HMAC-SHA256). Anyone watching the Wi-Fi sees nothing readable and cannot change or replay anything.
 - After pairing the PC keeps a secret key (locked to your Windows user). From then on the PC reconnects by itself, with no QR code.
 - Tap "forget all paired PCs" on the phone to lock out every PC.
+- **Strict mode** (tick it on the phone and on the PC): nothing is remembered. Every session needs a fresh QR scan, and a dropped connection means scanning again. Most private; least convenient.
 - The phone scans the picture with its camera and throws the frames away. Nothing is saved or sent anywhere.
 - Best links: a USB cable (USB tethering) or the phone's own hotspot / Wi-Fi Direct. Your home Wi-Fi works too.
 - The phone app and the PC app must both be v3. The build publishes them together.
