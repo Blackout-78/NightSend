@@ -722,6 +722,7 @@ function Sort-Name([string]$name) {
 function Start-Send {
     $src = $txtSrc.Text.Trim().TrimEnd("\")
     if (-not (Test-Path -LiteralPath $src -PathType Container)) { Log "Source folder not found."; return }
+    $script:SendSrc = $src
     Set-Busy $true
     if (-not (Connect-Phone)) { Set-Busy $false; return }
 
@@ -912,6 +913,32 @@ function Update-Progress {
         (Fmt $done), (Fmt $script:TotalBytes), (Fmt $speed), $eta)
 }
 
+# Optional: after a send where every file was checked by the phone, move the folder into the archive folder.
+# Same drive only (a rename, so nothing is copied or deleted). Nothing is ever removed.
+$script:SendSrc = $null
+function Archive-Source {
+    $src = $script:SendSrc
+    if (-not $chkArchive.Checked -or -not $src) { return }
+    try {
+        $dest = $txtArchive.Text.Trim().TrimEnd("\")
+        if (-not $dest) { Log "Archive: no archive folder chosen. Nothing moved."; return }
+        $srcFull = [IO.Path]::GetFullPath($src).TrimEnd("\")
+        $destFull = [IO.Path]::GetFullPath($dest).TrimEnd("\")
+        if ($srcFull.Length -le 3) { Log "Archive: will not move a whole drive. Nothing moved."; return }
+        if ($destFull -eq $srcFull -or $destFull.StartsWith($srcFull + "\", [StringComparison]::OrdinalIgnoreCase)) { Log "Archive: the archive folder is inside the folder you sent. Nothing moved."; return }
+        if ([IO.Path]::GetPathRoot($srcFull) -ne [IO.Path]::GetPathRoot($destFull)) { Log "Archive: the archive folder is on a different drive, so nothing was moved. Pick a folder on the same drive as the sent folder."; return }
+        [void](New-Item -ItemType Directory -Force -Path $destFull)
+        $name = Split-Path $srcFull -Leaf
+        $target = Join-Path $destFull $name
+        if (Test-Path -LiteralPath $target) { $target = Join-Path $destFull ($name + "_" + (Get-Date -Format "yyyyMMdd-HHmmss")) }
+        [IO.Directory]::Move($srcFull, $target)
+        Log ("Archived: moved " + $srcFull + " to " + $target + ". Nothing was deleted.")
+        $script:SendSrc = $null
+    } catch {
+        Log ("Archive: could not move the folder (" + $_.Exception.Message + "). Files may be open in another program. Nothing was deleted.")
+    }
+}
+
 function Finish-Send {
     $timer.Stop(); $script:Running = $false; Keep-Awake $false
     Close-Conn
@@ -919,6 +946,7 @@ function Finish-Send {
     if ($script:Failed.Count -eq 0) {
         $lblStatus.Text = "Done. All files sent and checked."
         Log "DONE - all files sent and size-checked by the phone."
+        Archive-Source
     } else {
         $lblStatus.Text = "Done with $($script:Failed.Count) failed file(s). Press SEND again to retry them."
         Log "Finished. $($script:Failed.Count) file(s) failed - press SEND again to retry only those."
@@ -1106,7 +1134,7 @@ function Show-PairQr {
 # ---------- UI ----------
 $form = New-Object Windows.Forms.Form
 $form.Text = "NightSend"
-$form.ClientSize = New-Object Drawing.Size(720, 600)
+$form.ClientSize = New-Object Drawing.Size(720, 634)
 $form.BackColor = $cBg; $form.ForeColor = $cText; $form.Font = $fUi
 $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false
 $form.StartPosition = "CenterScreen"
@@ -1171,19 +1199,26 @@ $chkSort.Text = "Auto-sort loose files by name (Show / Season)"; $chkSort.Checke
 $chkSort.Location = New-Object Drawing.Point(270, 298); $chkSort.Size = New-Object Drawing.Size(430, 26); $chkSort.ForeColor = $cText
 $form.Controls.Add($chkSort)
 
-$btnSend = B "SEND" 20 334 150
+$chkArchive = New-Object Windows.Forms.CheckBox
+$chkArchive.Text = "After a clean send, archive the folder to:"; $chkArchive.Checked = $false
+$chkArchive.Location = New-Object Drawing.Point(20, 332); $chkArchive.Size = New-Object Drawing.Size(290, 26); $chkArchive.ForeColor = $cText
+$form.Controls.Add($chkArchive)
+$txtArchive = T "D:\BnM\Sent to phone" 312 330 268
+$btnArchiveBrowse = B "Browse" 590 327 110
+
+$btnSend = B "SEND" 20 368 150
 $btnSend.BackColor = $cAccent; $btnSend.Font = $fBold
-$btnStop = B "Stop" 180 334 110; $btnStop.Enabled = $false
+$btnStop = B "Stop" 180 368 110; $btnStop.Enabled = $false
 
 $bar = New-Object Windows.Forms.ProgressBar
-$bar.Location = New-Object Drawing.Point(20, 380); $bar.Size = New-Object Drawing.Size(680, 18); $bar.Maximum = 1000
+$bar.Location = New-Object Drawing.Point(20, 414); $bar.Size = New-Object Drawing.Size(680, 18); $bar.Maximum = 1000
 $form.Controls.Add($bar)
-$lblStatus = L "Ready." 20 404 680 22 $null $cText
-$lblFile = L "" 20 426 680 22 $null $cDim
+$lblStatus = L "Ready." 20 438 680 22 $null $cText
+$lblFile = L "" 20 460 680 22 $null $cDim
 
 $txtLog = New-Object Windows.Forms.TextBox
 $txtLog.Multiline = $true; $txtLog.ScrollBars = "Vertical"; $txtLog.ReadOnly = $true
-$txtLog.Location = New-Object Drawing.Point(20, 456); $txtLog.Size = New-Object Drawing.Size(680, 128)
+$txtLog.Location = New-Object Drawing.Point(20, 490); $txtLog.Size = New-Object Drawing.Size(680, 128)
 $txtLog.BackColor = $cPanel; $txtLog.ForeColor = $cDim; $txtLog.BorderStyle = "FixedSingle"
 $txtLog.Font = New-Object Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
@@ -1194,6 +1229,11 @@ $timer.Add_Tick({ On-Tick })
 
 $btnFind.Add_Click({ Set-Busy $true; $btnStop.Enabled = $false; [void](Connect-Phone); Close-Conn; Set-Busy $false })
 $btnPair.Add_Click({ Show-PairQr })
+$btnArchiveBrowse.Add_Click({
+    $d = New-Object Windows.Forms.FolderBrowserDialog
+    $d.SelectedPath = $txtArchive.Text
+    if ($d.ShowDialog() -eq "OK") { $txtArchive.Text = $d.SelectedPath }
+})
 $btnSend.Add_Click({ Start-Send })
 $btnPick.Add_Click({ Pick-PhoneFolder })
 $btnStop.Add_Click({ Abort-Send "Stopped by you." })

@@ -34,6 +34,9 @@ Pair once per PC with a QR code:
 - Best links: a USB cable (USB tethering) or the phone's own hotspot / Wi-Fi Direct. Your home Wi-Fi works too.
 - The phone app and the PC app must both be v3. The build publishes them together.
 
+## Archive after sending
+Tick **After a clean send, archive the folder to** in the PC app and pick an archive folder. When every file has been sent and size-checked by the phone, the sent folder is moved into the archive folder. It is a plain move on the same drive: nothing is copied, compressed or deleted. If any file failed, or the archive folder is on another drive, nothing is moved.
+
 ## Background
 - Phone: NightSend receives in the background (foreground service, notification). Pick the save folder with **Choose folder**.
 - PC: minimize or press X while sending and it keeps going from the system tray. Right-click the tray icon > Exit to quit.
