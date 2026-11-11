@@ -162,6 +162,17 @@ public class QrScanActivity extends Activity implements TextureView.SurfaceTextu
         decoder.execute(() -> {
             try {
                 // QR codes are found at any rotation, so the frame is used as it comes from the camera.
+                // Own offline reader first; ZXing is only the backup.
+                String own = null;
+                try { own = QrDecoder.decode(copy, w, h); } catch (RuntimeException ignored) { }
+                if (own != null && own.startsWith("NS3:") && done.compareAndSet(false, true)) {
+                    final String t = own;
+                    runOnUiThread(() -> {
+                        setResult(RESULT_OK, new Intent().putExtra("qr", t));
+                        finish();
+                    });
+                    return;
+                }
                 PlanarYUVLuminanceSource src = new PlanarYUVLuminanceSource(copy, w, h, 0, 0, w, h, false);
                 Result r = reader.decode(new BinaryBitmap(new HybridBinarizer(src)), hints);
                 String text = r.getText();
