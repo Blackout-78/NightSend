@@ -123,9 +123,27 @@ public class TransferService extends Service {
     /** Strict mode: no PC is ever remembered, so every session needs a fresh QR scan. */
     static boolean strict(Context c) { return prefs(c).getBoolean("strict", false); }
 
+    /** The saved list, decrypted. An old unencrypted list is moved into encrypted storage on first read. */
+    private static String loadKeys(Context c) {
+        SharedPreferences p = prefs(c);
+        String blob = p.getString("keys2", null);
+        if (blob != null) { String s = KeyVault.open(blob); return s == null ? "" : s; }
+        String old = p.getString("keys", "");
+        if (!old.isEmpty()) saveKeys(c, old);   // also removes the unencrypted copy when it worked
+        return old;
+    }
+
+    private static void saveKeys(Context c, String list) {
+        String blob = KeyVault.seal(list);
+        SharedPreferences.Editor e = prefs(c).edit();
+        if (blob != null) e.putString("keys2", blob).remove("keys");
+        else e.remove("keys2").remove("keys");   // Keystore unusable: never write keys unencrypted, the PC pairs again
+        e.apply();
+    }
+
     static synchronized byte[] findKey(Context c, String id) {
         if (strict(c)) return null;
-        String all = prefs(c).getString("keys", "");
+        String all = loadKeys(c);
         for (String e : all.split(";")) {
             String[] p = e.split(":");
             if (p.length == 2 && p[0].equals(id) && Secure.isHex(p[1], 64)) return Secure.unhex(p[1]);
@@ -138,18 +156,19 @@ public class TransferService extends Service {
         String id = Secure.keyId(key);
         StringBuilder sb = new StringBuilder();
         int n = 0;
-        for (String e : prefs(c).getString("keys", "").split(";")) {
+        for (String e : loadKeys(c).split(";")) {
             if (e.isEmpty() || e.startsWith(id + ":")) continue;
             if (++n >= MAX_PCS) break;    // oldest ones fall off
             sb.append(e).append(';');
         }
         sb.append(id).append(':').append(Secure.hex(key));
-        prefs(c).edit().putString("keys", sb.toString()).apply();
+        saveKeys(c, sb.toString());
     }
 
     /** Locks out every PC: forgets all pairings and makes a new code. */
     static synchronized void forgetAll(Context c) {
-        prefs(c).edit().remove("keys").remove("code").apply();
+        prefs(c).edit().remove("keys").remove("keys2").remove("code").apply();
+        KeyVault.destroy();
         closePairing();
     }
 
@@ -279,6 +298,7 @@ public class TransferService extends Service {
                 .setContentIntent(pi)
                 .setOnlyAlertOnce(true)
                 .setOngoing(true)
+                .setVisibility(Notification.VISIBILITY_SECRET)   // file names stay off the lock screen
                 .build();
     }
 
