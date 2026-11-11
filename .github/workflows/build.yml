@@ -5,16 +5,19 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
   crypto-selftest:
+    permissions:
+      contents: read
     # Compiles the PC crypto the same way the app does and runs a full encrypted handshake over loopback.
     # If this fails nothing is published, so the APK and the exe can never get out of step.
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
       - name: PC crypto self-test (Windows PowerShell 5.1)
         shell: powershell
         run: ./pc/selftest.ps1
@@ -22,8 +25,12 @@ jobs:
   build:
     needs: crypto-selftest
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
       - name: Security guard (blocks the build if something dangerous was added)
         run: python3 .github/guard/guard.py --allow-internet
 
@@ -34,10 +41,14 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@ed408507eac070d1f99cc633dbcf757c94c7933a  # v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '8.14.4'
 
       - name: Decode keystore
-        run: echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > $RUNNER_TEMP/release.jks
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          umask 077
+          echo "$KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > "$RUNNER_TEMP/release.jks"
 
       - name: Build release APK
         env:
@@ -45,6 +56,10 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
         run: gradle :app:assembleRelease --no-daemon
+
+      - name: Remove keystore
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.jks"
 
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk NightSend.apk
@@ -59,8 +74,12 @@ jobs:
   pc-exe:
     needs: build   # one release at a time, so both files land on the same release
     runs-on: windows-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
 
       - name: Build NightSend.exe from pc/NightSend.ps1
         shell: pwsh

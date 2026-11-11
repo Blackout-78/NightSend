@@ -32,7 +32,15 @@ import java.nio.charset.StandardCharsets;
 import java.security.KeyPair;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.util.Locale;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * NightSend receiver service. Runs in the foreground so it keeps receiving with the
@@ -67,6 +75,13 @@ public class TransferService extends Service {
     static volatile boolean running = false;
 
     static final SecureRandom RNG = new SecureRandom();
+
+    // Connection limits: a stranger on the network must not be able to lock the real PC out.
+    static final int MAX_CONNECTIONS = 4;               // at most this many sockets open at once
+    static final long HANDSHAKE_MS = 8000;               // the whole login must finish within this time
+    static final Semaphore SLOTS = new Semaphore(MAX_CONNECTIONS);
+    static final ReentrantLock SESSION = new ReentrantLock();   // only one logged-in PC at a time
+    static final ScheduledExecutorService WATCH = Executors.newSingleThreadScheduledExecutor();
 
     SharedPreferences prefs;
     ServerSocket server;
@@ -153,7 +168,17 @@ public class TransferService extends Service {
     static boolean allowed(String p) {
         if (p.isEmpty() || !p.startsWith("/")) return false;
         for (String part : p.split("/")) if (part.equals("..")) return false;
-        return p.startsWith("/storage/") || p.startsWith(Environment.getExternalStorageDirectory().getPath());
+        if (p.indexOf('\0') >= 0) return false;
+        String ext = Environment.getExternalStorageDirectory().getPath();
+        return p.startsWith("/storage/") || p.equals(ext) || p.startsWith(ext + "/");
+    }
+
+    /** Only phone-network addresses (home Wi-Fi, hotspot, USB tether, Wi-Fi Direct) may connect, never the internet. */
+    static boolean localPeer(InetAddress a) {
+        if (a == null) return false;
+        if (a.isLoopbackAddress() || a.isSiteLocalAddress() || a.isLinkLocalAddress()) return true;
+        if (a instanceof Inet6Address) return (a.getAddress()[0] & 0xFE) == 0xFC;   // fc00::/7 private range
+        return false;
     }
 
     /** Top of the storage volume a folder is on (phone storage or an SD card). */
@@ -292,13 +317,22 @@ public class TransferService extends Service {
                     if (!running) return;
                     break; // listening socket broke: open a fresh one
                 }
-                try {
-                    handle(s);
-                } catch (Throwable t) {
-                    // never let one bad connection kill the receiver
-                    status = "Connection error: " + t;
+                if (!localPeer(s.getInetAddress()) || !SLOTS.tryAcquire()) {
                     try { s.close(); } catch (IOException ignored) { }
+                    continue;
                 }
+                final Socket sock = s;
+                new Thread(() -> {
+                    try {
+                        handle(sock);
+                    } catch (Throwable t) {
+                        // never let one bad connection kill the receiver
+                        status = "Connection error: " + t;
+                        try { sock.close(); } catch (IOException ignored) { }
+                    } finally {
+                        SLOTS.release();
+                    }
+                }, "nightsend-conn").start();
             }
             try { server.close(); } catch (IOException ignored) { }
             pause(500);
@@ -310,6 +344,10 @@ public class TransferService extends Service {
     }
 
     void handle(Socket s) {
+        // The whole login has a hard time limit, so a slow trickle of bytes cannot hold a slot.
+        ScheduledFuture<?> watchdog = WATCH.schedule(() -> {
+            try { s.close(); } catch (IOException ignored) { }
+        }, HANDSHAKE_MS, TimeUnit.MILLISECONDS);
         try {
             // Nothing is answered or shown until the PC proves it knows the code or a saved key.
             s.setSoTimeout(10000);
@@ -370,10 +408,17 @@ public class TransferService extends Service {
             Secure.Keys keys = new Secure.Keys(Secure.hmac(k, Secure.utf8("NS2-MASTER"), zh, t));
             InputStream in = new Secure.In(raw, keys.c2sEnc, keys.c2sMac);
             OutputStream out = new Secure.Out(rawOut, keys.s2cEnc, keys.s2cMac);
-            session(s, in, out);
+            watchdog.cancel(false);
+            if (!SESSION.tryLock()) { send(out, "ERR busy"); return; }   // another PC is already connected
+            try {
+                session(s, in, out);
+            } finally {
+                SESSION.unlock();
+            }
         } catch (Exception e) {
             // ignore: a bad or dropped connection before pairing
         } finally {
+            watchdog.cancel(false);
             try { s.close(); } catch (IOException ignored) { }
         }
     }
@@ -426,8 +471,10 @@ public class TransferService extends Service {
                     out.flush();
                 } else if (line.startsWith("PUT ")) {
                     String[] p = line.split(" ", 3);
+                    if (p.length < 3) { send(out, "ERR bad command"); continue; }
                     long size = Long.parseLong(p[1]);
                     String rel = p[2];
+                    if (size < 0) { send(out, "ERR bad size"); continue; }
                     String err = receive(in, dest, rel, size, buf);
                     send(out, err == null ? "OK" : "ERR " + err);
                     if (err != null && err.startsWith("!")) break; // stream broken
@@ -451,9 +498,12 @@ public class TransferService extends Service {
     /** Returns null on success, an error text otherwise. "!"-prefixed errors mean the stream is out of sync. */
     String receive(InputStream in, File dest, String rel, long size, byte[] buf) {
         String safe = rel.replace('\\', '/');
+        boolean bad = safe.isEmpty() || safe.startsWith("/") || safe.endsWith("/") || safe.endsWith(".nspart");
+        for (int i = 0; i < safe.length() && !bad; i++) if (safe.charAt(i) < 32) bad = true;   // control characters
         for (String part : safe.split("/")) {
-            if (part.equals("..")) { skip(in, size, buf); return "bad path"; }
+            if (part.equals("..") || part.equals(".") || part.isEmpty()) bad = true;
         }
+        if (bad) { skip(in, size, buf); return "bad path"; }
         File target = new File(dest, safe);
         File partFile = new File(target.getPath() + ".nspart");
         currentFile = safe; curSize = size; curDone = 0;

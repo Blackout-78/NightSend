@@ -1,0 +1,12 @@
+*.jks
+*.keystore
+*.p12
+*.pem
+local.properties
+keystore.properties
+KEYSTORE_*.txt
+KEY_ALIAS.txt
+github-secrets*.txt
+.env
+build/
+.gradle/
