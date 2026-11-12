@@ -30,6 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - name: Security guard (blocks the build if something dangerous was added)
         run: python3 .github/guard/guard.py --allow-internet
@@ -64,11 +65,18 @@ jobs:
       - name: Rename APK
         run: cp app/build/outputs/apk/release/app-release.apk NightSend.apk
 
+      - name: Write what's new
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          bash .github/release-notes.sh '^(build-|v[0-9])' . > release-body.md
+
       - name: Publish release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: NightSend build ${{ github.run_number }}
+          name: NightSend 0.8 (build ${{ github.run_number }})
+          body_path: release-body.md
           files: NightSend.apk
 
   pc-exe:
@@ -98,5 +106,5 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: NightSend build ${{ github.run_number }}
+          name: NightSend 0.8 (build ${{ github.run_number }})
           files: NightSend.exe
