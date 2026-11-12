@@ -81,6 +81,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Stamp the build number
+        shell: pwsh
+        run: |
+          $stamp = "build ${{ github.run_number }} - " + $env:GITHUB_SHA.Substring(0,7)
+          (Get-Content pc/NightSend.ps1 -Raw).Replace('$BuildStamp = "build dev"', ('$BuildStamp = "' + $stamp + '"')) | Set-Content pc/NightSend.ps1 -NoNewline -Encoding UTF8
+          if (-not (Select-String -Path pc/NightSend.ps1 -Pattern ('"' + $stamp + '"') -Quiet)) { throw "stamp not applied" }
       - name: Build NightSend.exe from pc/NightSend.ps1
         shell: pwsh
         run: |

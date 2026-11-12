@@ -79,6 +79,7 @@ public class MainActivity extends Activity {
         root.setBackgroundColor(BG);
         int pad = dp(20);
         root.setPadding(pad, pad, pad, pad);
+        root.addView(text("build " + BuildConfig.BUILD_NUMBER, 11, DIM));
 
         TextView title = text("NIGHTSEND", 34, TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
@@ -189,6 +190,8 @@ public class MainActivity extends Activity {
                 "To send from this phone to the PC: choose a folder under SEND TO PC, then press RECEIVE on the PC.\n" +
                 "NightSend keeps receiving in the background, even with the screen off or this app closed. " +
                 "Stop it from the notification.", 14, DIM));
+
+        root.addView(text("NightSend " + BuildConfig.VERSION_NAME + " \u00B7 build " + BuildConfig.BUILD_NUMBER + " \u00B7 " + BuildConfig.GIT_SHA, 12, DIM));
 
         ScrollView sv = new ScrollView(this);
         sv.setBackgroundColor(BG);

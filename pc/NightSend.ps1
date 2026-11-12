@@ -1271,9 +1271,10 @@ function Start-Receive {
 }
 
 # ---------- UI ----------
+$BuildStamp = "build dev"   # the build replaces this line with the real build number and commit
 $form = New-Object Windows.Forms.Form
 $form.Text = "NightSend"
-$form.ClientSize = New-Object Drawing.Size(720, 740)
+$form.ClientSize = New-Object Drawing.Size(720, 764)
 $form.BackColor = $cBg; $form.ForeColor = $cText; $form.Font = $fUi
 $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false
 $form.StartPosition = "CenterScreen"
@@ -1368,6 +1369,7 @@ $txtLog.Location = New-Object Drawing.Point(20, 598); $txtLog.Size = New-Object 
 $txtLog.BackColor = $cPanel; $txtLog.ForeColor = $cDim; $txtLog.BorderStyle = "FixedSingle"
 $txtLog.Font = New-Object Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
+$lblBuild = L ("NightSend " + $BuildStamp) 20 734 680 18 $null $cDim
 
 $timer = New-Object Windows.Forms.Timer
 $timer.Interval = 20
