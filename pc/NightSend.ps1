@@ -666,6 +666,7 @@ function Set-Busy([bool]$busy) {
     $btnSend.Enabled = -not $busy; $btnFind.Enabled = -not $busy
     $btnBrowse.Enabled = -not $busy; $btnStop.Enabled = $busy; $btnPick.Enabled = -not $busy
     $chkRoot.Enabled = -not $busy; $chkSort.Enabled = -not $busy
+    $btnRecv.Enabled = -not $busy; $btnRecvBrowse.Enabled = -not $busy
 }
 
 # ---------- connect ----------
@@ -956,6 +957,7 @@ function Finish-Send {
 }
 
 function Abort-Send([string]$why) {
+    $script:RecvStop = $true
     $timer.Stop(); $script:Running = $false; Keep-Awake $false
     $script:Pend = $null; $script:AwaitOk = $false; $script:RetryAt = $null
     if ($script:Fs) { try { $script:Fs.Close() } catch {}; $script:Fs = $null }
@@ -1131,10 +1133,147 @@ function Show-PairQr {
     try { [void]$dlg.ShowDialog($form) } finally { $pb.Image = $null; $bmp.Dispose(); $dlg.Dispose() }
 }
 
+# ---------- receive from the phone ----------
+$script:Receiving = $false; $script:RecvStop = $false
+
+# A file name from the phone becomes a path that must stay inside the chosen PC folder (bad characters become _).
+function Safe-RecvPath([string]$dest, [string]$rel) {
+    $bad = [IO.Path]::GetInvalidFileNameChars()
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($p in ($rel -split "[/\\]")) {
+        if (-not $p -or $p -eq "." -or $p -eq "..") { return $null }
+        $c = $p
+        foreach ($ch in $bad) { $c = $c.Replace([string]$ch, "_") }
+        $c = $c.TrimEnd(".", " ")
+        if (-not $c) { return $null }
+        [void]$parts.Add($c)
+    }
+    try {
+        $full = [IO.Path]::GetFullPath((Join-Path $dest ($parts -join "\")))
+        $root = [IO.Path]::GetFullPath($dest).TrimEnd("\") + "\"
+    } catch { return $null }
+    if (-not $full.StartsWith($root, [StringComparison]::OrdinalIgnoreCase)) { return $null }
+    return $full
+}
+
+# Pulls every file from the folder the phone chose to send ("SEND TO PC" on the phone) into the PC folder.
+# Files already here with the same size are skipped, so pressing RECEIVE again continues where it stopped.
+function Start-Receive {
+    $dest = $txtRecv.Text.Trim().TrimEnd("\")
+    if (-not $dest) { $lblStatus.Text = "Pick a folder on this PC to save into."; return }
+    try { [void][IO.Directory]::CreateDirectory($dest) } catch { $lblStatus.Text = "Cannot use that folder: " + $_.Exception.Message; return }
+    $script:Receiving = $true; $script:RecvStop = $false; $script:Running = $true; Keep-Awake $true
+    Set-Busy $true
+    $bar.Value = 0; $lblFile.Text = ""
+    try {
+        $lblStatus.Text = "Connecting..."; [Windows.Forms.Application]::DoEvents()
+        if (-not (Connect-Phone)) { $lblStatus.Text = "Not connected."; return }
+        # Everything below reads straight from the encrypted stream (one line, or exact file bytes), never through the line reader.
+        Send-Line "OUTBOX"
+        $r = [NsCrypto]::ReadLine($script:Ns)
+        if (-not $r) { throw "The phone did not answer." }
+        if ($r.StartsWith("ERR unknown")) { throw "The phone app is too old. Install the newest NightSend.apk from Releases." }
+        if (-not $r.StartsWith("OK|")) { throw ($r -replace "^ERR\s*", "") }
+        Log ("The phone is sharing: " + $r.Substring(3))
+
+        $lblStatus.Text = "Reading the list from the phone..."; [Windows.Forms.Application]::DoEvents()
+        Send-Line "OTREE"
+        $items = New-Object System.Collections.ArrayList
+        while ($true) {
+            $l = [NsCrypto]::ReadLine($script:Ns)
+            if ($l -eq $null) { throw "The phone closed the connection." }
+            if ($l -eq "END") { break }
+            if ($l.StartsWith("ERR")) { throw ($l -replace "^ERR\s*", "") }
+            $i = $l.IndexOf("|")
+            if ($i -lt 1) { continue }
+            [void]$items.Add(@{ Size = [int64]$l.Substring(0, $i); Rel = $l.Substring($i + 1) })
+        }
+
+        $todo = New-Object System.Collections.ArrayList
+        $skipped = 0; $failed = 0
+        foreach ($it in $items) {
+            $full = Safe-RecvPath $dest $it.Rel
+            if (-not $full) { Log ("Skipped (name not allowed): " + $it.Rel); $failed++; continue }
+            if ((Test-Path -LiteralPath $full -PathType Leaf) -and ((Get-Item -LiteralPath $full -Force).Length -eq $it.Size)) { $skipped++; continue }
+            [void]$todo.Add(@{ Rel = $it.Rel; Size = $it.Size; Full = $full })
+        }
+        $total = [int64]0
+        foreach ($t in $todo) { $total += $t.Size }
+        if ($todo.Count -eq 0) {
+            $lblStatus.Text = "Nothing new. {0} file(s) already here." -f $skipped
+            Log $lblStatus.Text
+            return
+        }
+        $free = -1
+        try { $free = (New-Object IO.DriveInfo ([IO.Path]::GetPathRoot([IO.Path]::GetFullPath($dest)))).AvailableFreeSpace } catch {}
+        if ($free -ge 0 -and $free -lt $total) { throw ("Not enough space on this PC: need {0}, {1} free." -f (Fmt $total), (Fmt $free)) }
+        Log ("Receiving {0} file(s), {1}." -f $todo.Count, (Fmt $total))
+
+        $start = Get-Date; $lastUi = Get-Date
+        $got = [int64]0; $done = 0; $idx = 0
+        $buf = $script:Buf
+        foreach ($t in $todo) {
+            if ($script:RecvStop) { throw "Stopped by you." }
+            $idx++
+            $lblFile.Text = $t.Rel
+            Send-Line ("GET " + $t.Rel)
+            $h = [NsCrypto]::ReadLine($script:Ns)
+            if ($h -eq $null) { throw "The phone closed the connection." }
+            if (-not $h.StartsWith("OK|")) { Log ("The phone refused " + $t.Rel + ": " + $h); $failed++; continue }
+            $size = [int64]$h.Substring(3)
+            $part = $t.Full + ".nspart"
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t.Full))
+            $fs = $null; $ok = $false
+            try {
+                $fs = New-Object IO.FileStream($part, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None, 1048576)
+                $left = $size
+                while ($left -gt 0) {
+                    $n = $script:Ns.Read($buf, 0, [int][Math]::Min($buf.Length, $left))
+                    if ($n -le 0) { throw "The phone closed the connection." }
+                    $fs.Write($buf, 0, $n); $left -= $n; $got += $n
+                    if (((Get-Date) - $lastUi).TotalMilliseconds -gt 150) {
+                        $lastUi = Get-Date
+                        $sec = [Math]::Max(0.5, ((Get-Date) - $start).TotalSeconds)
+                        $bar.Value = [int][Math]::Min(1000, 1000 * $got / [Math]::Max(1, $total))
+                        $lblStatus.Text = "File {0} of {1}  -  {2} of {3}  -  {4}/s" -f $idx, $todo.Count, (Fmt $got), (Fmt $total), (Fmt ($got / $sec))
+                        [Windows.Forms.Application]::DoEvents()
+                        if ($script:RecvStop) { throw "Stopped by you." }
+                    }
+                }
+                $ok = $true
+            } finally {
+                if ($fs) { $fs.Close() }
+                if (-not $ok) { Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue }
+            }
+            if ((New-Object IO.FileInfo($part)).Length -ne $size) {
+                Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
+                Log ("Size check failed, not kept: " + $t.Rel); $failed++; continue
+            }
+            if (Test-Path -LiteralPath $t.Full) { Remove-Item -LiteralPath $t.Full -Force }
+            [IO.File]::Move($part, $t.Full)
+            $done++
+        }
+        $bar.Value = 1000; $lblFile.Text = ""
+        $msg = "Done. {0} file(s) received ({1})." -f $done, (Fmt $got)
+        if ($skipped) { $msg += " $skipped already here." }
+        if ($failed) { $msg += " $failed failed - press RECEIVE again to retry." }
+        $lblStatus.Text = $msg
+        Log $msg
+    } catch {
+        $lblStatus.Text = "Stopped: " + $_.Exception.Message
+        Log ("Receive stopped: " + $_.Exception.Message + "  Press RECEIVE to continue.")
+    } finally {
+        Close-Conn
+        $script:Receiving = $false; $script:Running = $false; Keep-Awake $false
+        Set-Busy $false
+        Tray-Note "NightSend" $lblStatus.Text
+    }
+}
+
 # ---------- UI ----------
 $form = New-Object Windows.Forms.Form
 $form.Text = "NightSend"
-$form.ClientSize = New-Object Drawing.Size(720, 634)
+$form.ClientSize = New-Object Drawing.Size(720, 740)
 $form.BackColor = $cBg; $form.ForeColor = $cText; $form.Font = $fUi
 $form.FormBorderStyle = "FixedSingle"; $form.MaximizeBox = $false
 $form.StartPosition = "CenterScreen"
@@ -1210,15 +1349,22 @@ $btnSend = B "SEND" 20 368 150
 $btnSend.BackColor = $cAccent; $btnSend.Font = $fBold
 $btnStop = B "Stop" 180 368 110; $btnStop.Enabled = $false
 
+[void](L "3  RECEIVE FROM PHONE (the folder the phone chose to send)" 20 410 600 22 $fBold $cDim)
+[void](L "Save on this PC:" 20 442 126 22 $null $cDim)
+$txtRecv = T (Join-Path ([Environment]::GetFolderPath("UserProfile")) "Downloads\From phone") 148 438 426
+$btnRecvBrowse = B "Browse" 584 435 116
+$btnRecv = B "RECEIVE" 20 474 150
+$btnRecv.BackColor = $cAccent; $btnRecv.Font = $fBold
+
 $bar = New-Object Windows.Forms.ProgressBar
-$bar.Location = New-Object Drawing.Point(20, 414); $bar.Size = New-Object Drawing.Size(680, 18); $bar.Maximum = 1000
+$bar.Location = New-Object Drawing.Point(20, 522); $bar.Size = New-Object Drawing.Size(680, 18); $bar.Maximum = 1000
 $form.Controls.Add($bar)
-$lblStatus = L "Ready." 20 438 680 22 $null $cText
-$lblFile = L "" 20 460 680 22 $null $cDim
+$lblStatus = L "Ready." 20 546 680 22 $null $cText
+$lblFile = L "" 20 568 680 22 $null $cDim
 
 $txtLog = New-Object Windows.Forms.TextBox
 $txtLog.Multiline = $true; $txtLog.ScrollBars = "Vertical"; $txtLog.ReadOnly = $true
-$txtLog.Location = New-Object Drawing.Point(20, 490); $txtLog.Size = New-Object Drawing.Size(680, 128)
+$txtLog.Location = New-Object Drawing.Point(20, 598); $txtLog.Size = New-Object Drawing.Size(680, 128)
 $txtLog.BackColor = $cPanel; $txtLog.ForeColor = $cDim; $txtLog.BorderStyle = "FixedSingle"
 $txtLog.Font = New-Object Drawing.Font("Consolas", 9)
 $form.Controls.Add($txtLog)
@@ -1236,7 +1382,13 @@ $btnArchiveBrowse.Add_Click({
 })
 $btnSend.Add_Click({ Start-Send })
 $btnPick.Add_Click({ Pick-PhoneFolder })
-$btnStop.Add_Click({ Abort-Send "Stopped by you." })
+$btnStop.Add_Click({ if ($script:Receiving) { $script:RecvStop = $true; $btnStop.Enabled = $false } else { Abort-Send "Stopped by you." } })
+$btnRecv.Add_Click({ Start-Receive })
+$btnRecvBrowse.Add_Click({
+    $d = New-Object Windows.Forms.FolderBrowserDialog
+    $d.SelectedPath = $txtRecv.Text
+    if ($d.ShowDialog() -eq "OK") { $txtRecv.Text = $d.SelectedPath }
+})
 $btnBrowse.Add_Click({
     $d = New-Object Windows.Forms.FolderBrowserDialog
     $d.SelectedPath = $txtSrc.Text

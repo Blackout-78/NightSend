@@ -26,6 +26,7 @@ import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.File;
 import java.net.Inet4Address;
@@ -54,7 +55,8 @@ public class MainActivity extends Activity {
     final Handler ui = new Handler(Looper.getMainLooper());
     final List<File> volumes = new ArrayList<>();
 
-    TextView statusView, addrView, progressView, storageView, codeView, folderView;
+    TextView statusView, addrView, progressView, storageView, codeView, folderView, outboxView;
+    String pickKey = "dest";   // which setting the folder picker is choosing: "dest" (save folder) or "outbox" (folder sent to the PC)
     Button grantButton;
     SharedPreferences prefs;
     static final int REQ_SCAN = 7;
@@ -162,11 +164,29 @@ public class MainActivity extends Activity {
         gp.setMargins(0, dp(12), 0, 0);
         root.addView(grantButton, gp);
 
+        root.addView(header("SEND TO PC (folder on this phone)"));
+        outboxView = text("", 16, TEXT);
+        outboxView.setTypeface(Typeface.MONOSPACE);
+        root.addView(outboxView);
+        Button sendButton = new Button(this);
+        sendButton.setText("Choose folder to send");
+        sendButton.setTextColor(Color.WHITE);
+        sendButton.setBackgroundColor(PANEL);
+        sendButton.setOnClickListener(v -> chooseOutbox());
+        LinearLayout.LayoutParams op = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        op.setMargins(0, dp(8), 0, 0);
+        root.addView(sendButton, op);
+        TextView stopShare = text("Tap here to stop sharing", 13, ACCENT);
+        stopShare.setOnClickListener(v -> { prefs.edit().remove("outbox").apply(); updateDest(); });
+        root.addView(stopShare);
+        root.addView(text("Then press RECEIVE on the PC. The PC can only take files from this one folder.", 14, DIM));
+
         root.addView(header("HOW TO CONNECT"));
         root.addView(text(
                 "1. Connect the phone and PC: USB cable (USB tethering), the phone's hotspot / Wi-Fi Direct, or the same Wi-Fi.\n" +
                 "2. On the PC press Pair with QR. Here tap Scan the PC's QR code and point the camera at it.\n" +
                 "3. On the PC press Find phone.\n" +
+                "To send from this phone to the PC: choose a folder under SEND TO PC, then press RECEIVE on the PC.\n" +
                 "NightSend keeps receiving in the background, even with the screen off or this app closed. " +
                 "Stop it from the notification.", 14, DIM));
 
@@ -231,13 +251,14 @@ public class MainActivity extends Activity {
             statusView.setText(TransferService.status);
             statusView.setTextColor(TransferService.connected ? GOOD : TEXT);
             if (TransferService.connected && TransferService.curSize > 0) {
-                progressView.setText(String.format(Locale.US, "%s\n%s of %s   |   this session: %d files, %s",
+                progressView.setText(String.format(Locale.US, "%s\n%s of %s   |   this session: %d received, %d sent",
                         TransferService.currentFile, TransferService.fmt(TransferService.curDone),
                         TransferService.fmt(TransferService.curSize), TransferService.sessionFiles,
-                        TransferService.fmt(TransferService.sessionBytes)));
-            } else if (TransferService.sessionFiles > 0) {
-                progressView.setText(String.format(Locale.US, "Received this session: %d files, %s",
-                        TransferService.sessionFiles, TransferService.fmt(TransferService.sessionBytes)));
+                        TransferService.sentFiles));
+            } else if (TransferService.sessionFiles > 0 || TransferService.sentFiles > 0) {
+                progressView.setText(String.format(Locale.US, "This session: %d received (%s), %d sent (%s)",
+                        TransferService.sessionFiles, TransferService.fmt(TransferService.sessionBytes),
+                        TransferService.sentFiles, TransferService.fmt(TransferService.sentBytes)));
             } else {
                 progressView.setText("");
             }
@@ -312,14 +333,26 @@ public class MainActivity extends Activity {
         grantButton.setVisibility(ok ? View.GONE : View.VISIBLE);
         long free = TransferService.freeBytes(d);
         folderView.setText(d.getPath());
+        File ob = TransferService.outboxFolder(this);
+        outboxView.setText(ob == null ? "Nothing shared." : ob.getPath());
         storageView.setText((ok ? "" : "Storage permission needed.  ") +
                 (free >= 0 ? TransferService.fmt(free) + " free" : ""));
     }
 
     // ---------------------------------------------------------------- folder picker
 
+    void chooseOutbox() {
+        if (!TransferService.hasStorage(this)) { askStorage(); return; }
+        pickKey = "outbox";
+        File cur = TransferService.outboxFolder(this);
+        if (cur == null) cur = Environment.getExternalStorageDirectory();
+        while (cur != null && !cur.isDirectory()) cur = cur.getParentFile();
+        showFolders(cur);
+    }
+
     void chooseFolder() {
         if (!TransferService.hasStorage(this)) { askStorage(); return; }
+        pickKey = "dest";
         File cur = TransferService.destFolder(this);
         while (cur != null && !cur.isDirectory()) cur = cur.getParentFile();
         showFolders(cur);
@@ -345,11 +378,17 @@ public class MainActivity extends Activity {
         b.setTitle(dir == null ? "Choose storage" : dir.getPath());
         b.setItems(names.toArray(new String[0]), (d, i) -> showFolders(targets.get(i)));
         if (dir != null) {
+            final String key = pickKey;
             b.setPositiveButton("Use this folder", (d, w) -> {
-                prefs.edit().putString("dest", shown.getPath()).apply();
+                if (key.equals("outbox") && volumes.contains(shown)) {
+                    // Sharing a whole storage would let the PC take everything on it.
+                    Toast.makeText(this, "Pick a folder inside the storage, not the whole storage.", Toast.LENGTH_LONG).show();
+                    return;
+                }
+                prefs.edit().putString(key, shown.getPath()).apply();
                 updateDest();
             });
-            b.setNeutralButton("New folder", (d, w) -> newFolder(shown));
+            if (key.equals("dest")) b.setNeutralButton("New folder", (d, w) -> newFolder(shown));
         }
         b.setNegativeButton("Cancel", null);
         b.show();

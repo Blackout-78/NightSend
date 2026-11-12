@@ -55,6 +55,9 @@ import java.util.concurrent.locks.ReentrantLock;
  *   MKDIR path       -> OK or ERR reason
  *   LIST             -> size|relativePath lines, then END
  *   PUT size relPath -> (then exactly size bytes) -> OK or ERR reason
+ *   OUTBOX           -> OK|path of the folder this phone chose to send to the PC, or ERR reason
+ *   OTREE            -> size|relativePath lines of that folder, then END
+ *   GET relPath      -> OK|size then exactly size bytes, or ERR reason (only files inside the OUTBOX folder)
  *   BYE
  */
 public class TransferService extends Service {
@@ -73,6 +76,7 @@ public class TransferService extends Service {
     static volatile String status = "Starting...";
     static volatile String currentFile = "";
     static volatile long curDone = 0, curSize = 0, sessionBytes = 0, sessionFiles = 0;
+    static volatile long sentBytes = 0, sentFiles = 0;   // phone -> PC, this run
     static volatile boolean connected = false;
     static volatile boolean running = false;
 
@@ -177,6 +181,12 @@ public class TransferService extends Service {
         String p = prefs(c).getString("dest", null);
         if (p != null && !p.isEmpty()) return new File(p);
         return new File(Environment.getExternalStorageDirectory(), "Movies/TV");
+    }
+
+    /** The one folder the PC may take files from (chosen on the phone), or null when nothing is shared. */
+    static File outboxFolder(Context c) {
+        String p = prefs(c).getString("outbox", null);
+        return p == null || p.isEmpty() ? null : new File(p);
     }
 
     static long freeBytes(File f) {
@@ -513,6 +523,22 @@ public class TransferService extends Service {
                     String err = receive(in, dest, rel, size, buf);
                     send(out, err == null ? "OK" : "ERR " + err);
                     if (err != null && err.startsWith("!")) break; // stream broken
+                } else if (line.equals("OUTBOX")) {
+                    File ob = outboxFolder(this);
+                    if (ob == null || !ob.isDirectory()) send(out, "ERR nothing shared - on the phone tap Choose folder to send");
+                    else if (!hasStorage(this)) send(out, "ERR the phone app needs storage permission");
+                    else send(out, "OK|" + ob.getPath());
+                } else if (line.equals("OTREE")) {
+                    File ob = outboxFolder(this);
+                    if (ob == null || !ob.isDirectory()) { send(out, "ERR nothing shared"); continue; }
+                    StringBuilder sb = new StringBuilder();
+                    walk(ob, "", sb);
+                    sb.append("END\n");
+                    out.write(sb.toString().getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                } else if (line.startsWith("GET ")) {
+                    String err = give(out, outboxFolder(this), line.substring(4), buf);
+                    if (err != null) send(out, "ERR " + err);
                 } else if (line.equals("BYE")) {
                     break;
                 } else {
@@ -574,6 +600,54 @@ public class TransferService extends Service {
         if (target.length() != size) return "size mismatch";
         sessionFiles++;
         sessionBytes += size;
+        return null;
+    }
+
+    /**
+     * Sends one file from the shared folder: an "OK|size" line, then exactly size bytes.
+     * Returns an error text when nothing was sent. A failure after the first byte throws, which ends the connection.
+     */
+    static String give(OutputStream out, File root, String rel, byte[] buf) throws IOException {
+        if (root == null || !root.isDirectory()) return "nothing shared";
+        String safe = rel.replace('\\', '/');
+        boolean bad = safe.isEmpty() || safe.startsWith("/") || safe.endsWith("/") || safe.endsWith(".nspart");
+        for (int i = 0; i < safe.length() && !bad; i++) if (safe.charAt(i) < 32) bad = true;
+        for (String part : safe.split("/")) {
+            if (part.equals("..") || part.equals(".") || part.isEmpty()) bad = true;
+        }
+        if (bad) return "bad path";
+        File canon;
+        try {
+            // The real path must stay inside the shared folder (a link pointing outside it is refused).
+            canon = new File(root, safe).getCanonicalFile();
+            if (!canon.getPath().startsWith(root.getCanonicalPath() + File.separator) || !canon.isFile()) return "no such file";
+        } catch (IOException e) {
+            return "no such file";
+        }
+        long size = canon.length();
+        java.io.FileInputStream fi;
+        try {
+            fi = new java.io.FileInputStream(canon);
+        } catch (IOException e) {
+            return "cannot read (" + e.getMessage() + ")";
+        }
+        currentFile = safe; curSize = size; curDone = 0;
+        try {
+            send(out, "OK|" + size);   // its own frame, so the PC reads the header apart from the file bytes
+            long left = size;
+            while (left > 0) {
+                int n = fi.read(buf, 0, (int) Math.min(buf.length, left));
+                if (n < 0) throw new IOException("file changed while sending");
+                out.write(buf, 0, n);
+                left -= n;
+                curDone += n;
+            }
+            out.flush();
+        } finally {
+            try { fi.close(); } catch (IOException ignored) { }
+        }
+        sentFiles++;
+        sentBytes += size;
         return null;
     }
 

@@ -1,6 +1,6 @@
 # NightSend
 
-Private direct file transfer from a Windows PC to an Android phone.
+Private direct file transfer between a Windows PC and an Android phone, both ways.
 The PC finds the phone by itself; you pair once by scanning a QR code. No internet, no cloud, no relay.
 
 - `app/` - Android receiver app (APK built automatically by GitHub Actions, see Releases)
@@ -33,6 +33,15 @@ Pair once per PC with a QR code:
 - The phone scans the picture with its camera and throws the frames away. Nothing is saved or sent anywhere.
 - Best links: a USB cable (USB tethering) or the phone's own hotspot / Wi-Fi Direct. Your home Wi-Fi works too.
 - The phone app and the PC app must both be v3. The build publishes them together.
+
+## Send from the phone to the PC
+1. On the phone, under **SEND TO PC**, tap **Choose folder to send** and pick a folder (not a whole storage).
+2. On the PC, pick **Save on this PC** (section 3) and press **RECEIVE**.
+
+- The PC can only take files from the one folder the phone chose, and only while it is paired. Tap **stop sharing** on the phone to close it.
+- Same encryption, same pairing, same Wi-Fi as sending. Folders keep their structure.
+- Files already on the PC with the same size are skipped, so pressing RECEIVE again continues where it stopped. A file is only kept once its size matches the phone's.
+- Both apps need this version. An older phone app answers "too old"; install the newest NightSend.apk.
 
 ## Archive after sending
 Tick **After a clean send, archive the folder to** in the PC app and pick an archive folder. When every file has been sent and size-checked by the phone, the sent folder is moved into the archive folder. It is a plain move on the same drive: nothing is copied, compressed or deleted. If any file failed, or the archive folder is on another drive, nothing is moved.
