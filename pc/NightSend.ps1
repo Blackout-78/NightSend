@@ -542,11 +542,12 @@ $script:Retries = 0; $script:RetryAt = $null; $script:LastProgress = Get-Date
 $script:Buf = New-Object byte[] (1MB)
 
 # ---------- colours ----------
-$cBg     = [Drawing.Color]::FromArgb(10,10,12)
-$cPanel  = [Drawing.Color]::FromArgb(28,28,32)
+$cBg     = [Drawing.Color]::FromArgb(0,0,0)
+$cPanel  = [Drawing.Color]::FromArgb(28,28,28)
 $cText   = [Drawing.Color]::FromArgb(220,220,225)
 $cDim    = [Drawing.Color]::FromArgb(130,130,140)
-$cAccent = [Drawing.Color]::FromArgb(150,30,40)
+$cAccent = [Drawing.Color]::FromArgb(35,41,93)
+$cBad    = [Drawing.Color]::FromArgb(220,70,80)
 $cGood   = [Drawing.Color]::FromArgb(90,170,110)
 $fUi     = New-Object Drawing.Font("Segoe UI", 10)
 $fBold   = New-Object Drawing.Font("Segoe UI Semibold", 10)
@@ -677,7 +678,7 @@ function Connect-Phone {
     if (-not $ip) { $ip = Find-PhoneIp }
     if (-not $ip) {
         $lblPhone.Text = "Phone not found. Open NightSend on the phone and make sure the phone and this PC are on the same Wi-Fi."
-        $lblPhone.ForeColor = $cAccent
+        $lblPhone.ForeColor = $cBad
         return $false
     }
     try {
@@ -692,14 +693,14 @@ function Connect-Phone {
         Log "Connected to $($h.Model) at $ip."
         if (-not $h.StorageOk) {
             $lblPhone.Text = "Connected, but the phone app needs storage permission. Tap 'Allow NightSend to save files' on the phone."
-            $lblPhone.ForeColor = $cAccent
+            $lblPhone.ForeColor = $cBad
             Close-Conn
             return $false
         }
         return $true
     } catch {
         $lblPhone.Text = "Could not connect: " + $_.Exception.Message
-        $lblPhone.ForeColor = $cAccent
+        $lblPhone.ForeColor = $cBad
         Close-Conn
         return $false
     }
@@ -1042,7 +1043,7 @@ function Pick-PhoneFolder {
                 if ($list.Items.Count -eq 0) { [void]$list.Items.Add("(no folders here - press Use this folder, or New folder)") }
             } catch {
                 $lblP.Text = "Could not read that folder: " + $_.Exception.Message + "   (If it says unknown command, update the phone app.)"
-                $lblP.ForeColor = $cAccent
+                $lblP.ForeColor = $cBad
             }
         }
         $open = {
@@ -1069,7 +1070,7 @@ function Pick-PhoneFolder {
                         Send-Line ("MKDIR " + $np)
                         $r = $script:Rd.ReadLine()
                         if ($r -eq "OK") { $script:DlgPath = $np } else { throw ("phone answered: " + $r) }
-                    } catch { $lblP.Text = "Could not make the folder: " + $_.Exception.Message; $lblP.ForeColor = $cAccent; return }
+                    } catch { $lblP.Text = "Could not make the folder: " + $_.Exception.Message; $lblP.ForeColor = $cBad; return }
                     & $refresh
                 }
             }

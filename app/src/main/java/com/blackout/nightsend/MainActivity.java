@@ -45,11 +45,12 @@ import java.util.Locale;
  */
 public class MainActivity extends Activity {
 
-    static final int BG = Color.rgb(10, 10, 12);
-    static final int PANEL = Color.rgb(28, 28, 32);
+    static final int BG = Color.rgb(0, 0, 0);
+    static final int PANEL = Color.rgb(28, 28, 28);
     static final int TEXT = Color.rgb(220, 220, 225);
     static final int DIM = Color.rgb(130, 130, 140);
-    static final int ACCENT = Color.rgb(150, 30, 40);
+    static final int ACCENT = Color.rgb(35, 41, 93);
+    static final int INK = Color.rgb(147, 160, 240);
     static final int GOOD = Color.rgb(90, 170, 110);
 
     final Handler ui = new Handler(Looper.getMainLooper());
@@ -110,7 +111,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams sp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
         sp.setMargins(0, dp(8), 0, 0);
         root.addView(scanButton, sp);
-        TextView typeBtn = text("No camera? Type the code instead", 13, ACCENT);
+        TextView typeBtn = text("No camera? Type the code instead", 13, INK);
         typeBtn.setOnClickListener(v -> typeCode());
         root.addView(typeBtn);
         android.widget.CheckBox strictBox = new android.widget.CheckBox(this);
@@ -124,7 +125,7 @@ public class MainActivity extends Activity {
                     : "Strict mode off. A paired PC reconnects by itself.";
         });
         root.addView(strictBox);
-        TextView newCodeBtn = text("Tap here to forget all paired PCs", 13, ACCENT);
+        TextView newCodeBtn = text("Tap here to forget all paired PCs", 13, INK);
         newCodeBtn.setOnClickListener(v -> new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
                 .setTitle("Forget all paired PCs?")
                 .setMessage("Every PC will need to be paired again with a new QR code.")
@@ -177,7 +178,7 @@ public class MainActivity extends Activity {
         LinearLayout.LayoutParams op = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
         op.setMargins(0, dp(8), 0, 0);
         root.addView(sendButton, op);
-        TextView stopShare = text("Tap here to stop sharing", 13, ACCENT);
+        TextView stopShare = text("Tap here to stop sharing", 13, INK);
         stopShare.setOnClickListener(v -> { prefs.edit().remove("outbox").apply(); updateDest(); });
         root.addView(stopShare);
         root.addView(text("Then press RECEIVE on the PC. The PC can only take files from this one folder.", 14, DIM));
