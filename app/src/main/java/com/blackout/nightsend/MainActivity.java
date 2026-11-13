@@ -192,6 +192,20 @@ public class MainActivity extends Activity {
                 "NightSend keeps receiving in the background, even with the screen off or this app closed. " +
                 "Stop it from the notification.", 14, DIM));
 
+        root.addView(header("UPDATES"));
+        Button releasesButton = new Button(this);
+        releasesButton.setText("Open GitHub Releases");
+        releasesButton.setTextColor(Color.WHITE);
+        releasesButton.setBackgroundColor(PANEL);
+        releasesButton.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, android.net.Uri.parse("https://github.com/Blackout-78/NightSend/releases")));
+            } catch (Exception ignored) { }
+        });
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(52));
+        rp.setMargins(0, dp(8), 0, dp(8));
+        root.addView(releasesButton, rp);
+
         root.addView(text("NightSend " + BuildConfig.VERSION_NAME + " \u00B7 build " + BuildConfig.BUILD_NUMBER + " \u00B7 " + BuildConfig.GIT_SHA, 12, DIM));
 
         ScrollView sv = new ScrollView(this);
