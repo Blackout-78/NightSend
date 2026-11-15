@@ -4,7 +4,8 @@ Private direct file transfer between a Windows PC and an Android phone, both way
 The PC finds the phone by itself; you pair once by scanning a QR code. No internet, no cloud, no relay.
 
 - `app/` - Android receiver app (APK built automatically by GitHub Actions, see Releases)
-- PC sender: `NightSend.exe` (see Releases), or `pc/NightSend.bat` + `pc/NightSend.ps1` (Windows 10/11, nothing to install)
+- PC sender (Windows): `NightSend.exe` (see Releases), or `pc/NightSend.bat` + `pc/NightSend.ps1` (Windows 10/11, nothing to install)
+- PC sender (Linux): `NightSend-linux-x86_64.tar.gz` (see Releases), or `pc/linux/nightsend.py` (see below)
 
 ## Screens
 
@@ -17,6 +18,16 @@ These are design previews. The finished app follows this look.
     <td><img src="docs/screenshots/03-pc-sender.png" width="360" alt="Pc sender"></td>
   </tr>
 </table>
+
+## Linux
+Same app, same look, same pairing as the Windows one. It pairs with the same NightSend phone app (v3).
+- Download `NightSend-linux-x86_64.tar.gz` from Releases, extract it, run `./NightSend`. One file, nothing to install. Built on Ubuntu 24.04, so it needs glibc 2.39 or newer (Linux Mint 22 and later).
+- Or run the source: `sudo apt install python3-tk python3-cryptography`, then `python3 pc/linux/nightsend.py`.
+- The pairing key is kept in `~/.config/nightsend/pairing-key.dat`, readable only by your Linux user (mode 600). Tick **Strict** to keep nothing.
+- It keeps the computer awake while sending (`systemd-inhibit`). Closing the window while a transfer runs minimizes it instead of stopping; use **Stop** to cancel.
+- Different from Windows: there is no tray icon. Finished-transfer notices use `notify-send` when the window is minimized.
+- Updates: the **Open GitHub Releases** button opens the Releases page in your browser. The app itself stays offline.
+- Tested on every build: the QR picture is checked against the Windows reference, the handshake runs against the phone's real `Secure.java`, and send / receive / reconnect / archive run against a fake phone (`pc/linux/selftest.py`).
 
 ## Pairing and encryption (v3)
 Pair once per PC with a QR code:

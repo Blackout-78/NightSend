@@ -22,8 +22,28 @@ jobs:
         shell: powershell
         run: ./pc/selftest.ps1
 
+  linux-selftest:
+    permissions:
+      contents: read
+    # Tests the Linux app: the QR picture, the encrypted handshake against the phone's REAL Secure.java, send / receive / reconnect.
+    # If this fails nothing is published.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3  # v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Linux self-test
+        run: |
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes -r pc/linux/requirements.txt
+          "$RUNNER_TEMP/venv/bin/python" -I pc/linux/selftest.py --require-java
+
   build:
-    needs: crypto-selftest
+    needs: [crypto-selftest, linux-selftest]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -108,3 +128,43 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: NightSend 0.8 (build ${{ github.run_number }})
           files: NightSend.exe
+
+  linux-binary:
+    needs: pc-exe   # one release at a time, so all files land on the same release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+
+      - name: Stamp the build number
+        run: |
+          stamp="build ${{ github.run_number }} - ${GITHUB_SHA:0:7}"
+          sed -i "s|^BUILD_STAMP = \"build dev\".*|BUILD_STAMP = \"$stamp\"|" pc/linux/nightsend.py
+          grep -q "^BUILD_STAMP = \"$stamp\"" pc/linux/nightsend.py
+
+      - name: Build NightSend for Linux (one file, nothing to install)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q python3-tk xvfb
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q --require-hashes -r pc/linux/requirements.txt
+          "$RUNNER_TEMP/venv/bin/pyinstaller" --onefile --noconfirm --name NightSend --distpath dist --workpath "$RUNNER_TEMP/pib" --specpath "$RUNNER_TEMP/pib" pc/linux/nightsend.py
+          test -x dist/NightSend
+
+      - name: Smoke test the built file (starts, shows its window, closes)
+        run: |
+          dist/NightSend --version
+          xvfb-run -a dist/NightSend --smoke
+
+      - name: Pack (keeps the run permission)
+        run: tar -C dist -czf NightSend-linux-x86_64.tar.gz NightSend
+
+      - name: Publish release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: NightSend 0.8 (build ${{ github.run_number }})
+          files: NightSend-linux-x86_64.tar.gz
