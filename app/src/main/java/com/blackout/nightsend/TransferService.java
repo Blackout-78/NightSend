@@ -65,6 +65,7 @@ public class TransferService extends Service {
     static final int PORT = 47800;
     static final int MAX_WRONG = 3;        // wrong pairing tries before the pairing window is closed
     static final long PAIR_WINDOW_MS = 2 * 60 * 1000;   // a scanned QR code is valid this long, once
+    static final long MIN_RESERVE = 16L * 1024 * 1024;   // always leave this much free on the phone
     static final int MAX_LINE = 8192;      // longest command line accepted
     static final String CHANNEL = "nightsend";
     static final int NOTE_ID = 47800;
@@ -84,7 +85,10 @@ public class TransferService extends Service {
 
     // Connection limits: a stranger on the network must not be able to lock the real PC out.
     static final int MAX_CONNECTIONS = 4;               // at most this many sockets open at once
-    static final long HANDSHAKE_MS = 8000;               // the whole login must finish within this time
+    static final long HANDSHAKE_MS = 3000;               // the whole login must finish within this time
+    static final int MAX_PREAUTH_PER_IP = 2;             // sockets per source address that may be logging in at once
+    static final java.util.concurrent.ConcurrentHashMap<String, Integer> PREAUTH = new java.util.concurrent.ConcurrentHashMap<>();
+    static final java.util.concurrent.ConcurrentHashMap<String, Integer> WRONG_BY_IP = new java.util.concurrent.ConcurrentHashMap<>();
     static final Semaphore SLOTS = new Semaphore(MAX_CONNECTIONS);
     static final ReentrantLock SESSION = new ReentrantLock();   // only one logged-in PC at a time
     static final ScheduledExecutorService WATCH = Executors.newSingleThreadScheduledExecutor();
@@ -115,11 +119,30 @@ public class TransferService extends Service {
         pairSecret = t;
         pairExpires = System.currentTimeMillis() + PAIR_WINDOW_MS;
         wrongTries = 0;
+        WRONG_BY_IP.clear();
         status = "Ready to pair. Press Find phone on the PC now (2 minutes).";
         return true;
     }
 
-    static void closePairing() { pairSecret = null; pairExpires = 0; wrongTries = 0; }
+    static void closePairing() { pairSecret = null; pairExpires = 0; wrongTries = 0; WRONG_BY_IP.clear(); }
+
+    /** Takes one "logging in" place for this address; false when it already has the maximum. */
+    static boolean takePre(String ip) {
+        boolean[] ok = {false};
+        PREAUTH.compute(ip, (k, v) -> {
+            int n = v == null ? 0 : v;
+            if (n >= MAX_PREAUTH_PER_IP) return v;
+            ok[0] = true;
+            return n + 1;
+        });
+        return ok[0];
+    }
+
+    /** Gives the place back, once, however often it is called. */
+    static void freePre(String ip, java.util.concurrent.atomic.AtomicBoolean held) {
+        if (!held.compareAndSet(true, false)) return;
+        PREAUTH.compute(ip, (k, v) -> (v == null || v <= 1) ? null : v - 1);
+    }
 
     static final int MAX_PCS = 8;
 
@@ -210,8 +233,12 @@ public class TransferService extends Service {
         if (p.isEmpty() || !p.startsWith("/")) return false;
         for (String part : p.split("/")) if (part.equals("..")) return false;
         if (p.indexOf('\0') >= 0) return false;
-        String ext = Environment.getExternalStorageDirectory().getPath();
-        return p.startsWith("/storage/") || p.equals(ext) || p.startsWith(ext + "/");
+        try {
+            // Canonical paths: a symlink or odd path cannot point outside shared storage.
+            String c = new File(p).getCanonicalPath();
+            String ext = Environment.getExternalStorageDirectory().getCanonicalPath();
+            return c.startsWith("/storage/") || c.equals(ext) || c.startsWith(ext + "/");
+        } catch (IOException e) { return false; }
     }
 
     /** Only phone-network addresses (home Wi-Fi, hotspot, USB tether, Wi-Fi Direct) may connect, never the internet. */
@@ -359,19 +386,29 @@ public class TransferService extends Service {
                     if (!running) return;
                     break; // listening socket broke: open a fresh one
                 }
-                if (!localPeer(s.getInetAddress()) || !SLOTS.tryAcquire()) {
+                String ip = s.getInetAddress() == null ? "" : s.getInetAddress().getHostAddress();
+                Integer bad = WRONG_BY_IP.get(ip);
+                if (!localPeer(s.getInetAddress()) || (bad != null && bad >= MAX_WRONG)   // this address already failed pairing too often
+                        || !takePre(ip)) {
+                    try { s.close(); } catch (IOException ignored) { }
+                    continue;
+                }
+                if (!SLOTS.tryAcquire()) {
+                    PREAUTH.compute(ip, (k, v) -> (v == null || v <= 1) ? null : v - 1);
                     try { s.close(); } catch (IOException ignored) { }
                     continue;
                 }
                 final Socket sock = s;
+                final java.util.concurrent.atomic.AtomicBoolean held = new java.util.concurrent.atomic.AtomicBoolean(true);
                 new Thread(() -> {
                     try {
-                        handle(sock);
+                        handle(sock, ip, held);
                     } catch (Throwable t) {
                         // never let one bad connection kill the receiver
                         status = "Connection error: " + t;
                         try { sock.close(); } catch (IOException ignored) { }
                     } finally {
+                        freePre(ip, held);
                         SLOTS.release();
                     }
                 }, "nightsend-conn").start();
@@ -385,7 +422,7 @@ public class TransferService extends Service {
         try { Thread.sleep(ms); } catch (InterruptedException ignored) { }
     }
 
-    void handle(Socket s) {
+    void handle(Socket s, String ip, java.util.concurrent.atomic.AtomicBoolean pre) {
         // The whole login has a hard time limit, so a slow trickle of bytes cannot hold a slot.
         ScheduledFuture<?> watchdog = WATCH.schedule(() -> {
             try { s.close(); } catch (IOException ignored) { }
@@ -430,9 +467,9 @@ public class TransferService extends Service {
                 if (pairing) {
                     if (k == null) {
                         status = "A PC tried to pair, but pairing is not open. Tap \"Scan the PC's QR code\" first.";
-                    } else if (++wrongTries >= MAX_WRONG) {
-                        closePairing();
-                        status = "Wrong pairing " + MAX_WRONG + " times from " + s.getInetAddress().getHostAddress() + ". Pairing closed. Scan the QR code again.";
+                    } else if (WRONG_BY_IP.merge(ip, 1, Integer::sum) >= MAX_WRONG) {
+                        // Only this address is shut out; the pairing window stays open for the real PC.
+                        status = "Wrong pairing " + MAX_WRONG + " times from " + ip + ". That address is blocked until you scan the QR code again.";
                     } else {
                         status = "Wrong pairing secret from " + s.getInetAddress().getHostAddress() + ". Blocked.";
                     }
@@ -449,11 +486,11 @@ public class TransferService extends Service {
                 closePairing();   // the secret works once: the next PC needs its own QR code
                 status = strict(this) ? "PC connected (strict mode: scan a new QR for the next session)." : "PC paired.";
             }
-            wrongTries = 0;
             Secure.Keys keys = new Secure.Keys(Secure.hmac(k, Secure.utf8("NS2-MASTER"), zh, t));
             InputStream in = new Secure.In(raw, keys.c2sEnc, keys.c2sMac);
             OutputStream out = new Secure.Out(rawOut, keys.s2cEnc, keys.s2cMac);
             watchdog.cancel(false);
+            freePre(ip, pre);
             if (!SESSION.tryLock()) { send(out, "ERR busy"); return; }   // another PC is already connected
             try {
                 session(s, in, out);
@@ -520,6 +557,8 @@ public class TransferService extends Service {
                     long size = Long.parseLong(p[1]);
                     String rel = p[2];
                     if (size < 0) { send(out, "ERR bad size"); continue; }
+                    long free = freeBytes(dest);
+                    if (free >= 0 && size > Math.max(0, free - MIN_RESERVE)) { send(out, "ERR not enough space on the phone"); break; }   // bytes would follow: close instead of desyncing
                     String err = receive(in, dest, rel, size, buf);
                     send(out, err == null ? "OK" : "ERR " + err);
                     if (err != null && err.startsWith("!")) break; // stream broken
@@ -566,6 +605,23 @@ public class TransferService extends Service {
         }
         if (bad) { skip(in, size, buf); return "bad path"; }
         File target = new File(dest, safe);
+        try {
+            // A symlink inside the save folder must not lead the file outside it.
+            String root = dest.getCanonicalPath();
+            String tc = target.getCanonicalPath();
+            if (!tc.startsWith(root + "/")) { skip(in, size, buf); return "bad path"; }
+            // Never replace a file that is already there: save under a free name like "name (1).ext".
+            if (target.exists()) {
+                String nm = target.getName();
+                int dot = nm.lastIndexOf('.');
+                String base = dot > 0 ? nm.substring(0, dot) : nm;
+                String ex = dot > 0 ? nm.substring(dot) : "";
+                for (int i = 1; target.exists(); i++) {
+                    if (i > 9999) { skip(in, size, buf); return "too many copies"; }
+                    target = new File(target.getParentFile(), base + " (" + i + ")" + ex);
+                }
+            }
+        } catch (IOException e) { skip(in, size, buf); return "bad path"; }
         File partFile = new File(target.getPath() + ".nspart");
         currentFile = safe; curSize = size; curDone = 0;
         FileOutputStream fo = null;
@@ -595,7 +651,6 @@ public class TransferService extends Service {
         }
         closeQuietly(fo);
         if (writeErr != null) { partFile.delete(); return writeErr; }
-        if (target.exists()) target.delete();
         if (!partFile.renameTo(target)) return "rename failed";
         if (target.length() != size) return "size mismatch";
         sessionFiles++;

@@ -1147,8 +1147,13 @@ function Safe-RecvPath([string]$dest, [string]$rel) {
         foreach ($ch in $bad) { $c = $c.Replace([string]$ch, "_") }
         $c = $c.TrimEnd(".", " ")
         if (-not $c) { return $null }
+        # Windows device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9), with or without an extension, are never allowed.
+        if ($c -match '^(?i:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$') { return $null }
         [void]$parts.Add($c)
     }
+    # Programs and shortcuts get ".blocked" added so a double-click cannot run them.
+    $leaf = $parts[$parts.Count - 1]
+    if ($leaf -match '(?i)\.(exe|bat|cmd|ps1|lnk|scr|vbs|js|msi|com)$') { $parts[$parts.Count - 1] = $leaf + ".blocked" }
     try {
         $full = [IO.Path]::GetFullPath((Join-Path $dest ($parts -join "\")))
         $root = [IO.Path]::GetFullPath($dest).TrimEnd("\") + "\"
@@ -1222,6 +1227,8 @@ function Start-Receive {
             if ($h -eq $null) { throw "The phone closed the connection." }
             if (-not $h.StartsWith("OK|")) { Log ("The phone refused " + $t.Rel + ": " + $h); $failed++; continue }
             $size = [int64]$h.Substring(3)
+            # The phone must send exactly the size it listed; anything else means the stream cannot be trusted.
+            if ($size -ne [int64]$t.Size) { throw ("The phone announced a different size for " + $t.Rel + " than it listed. Stopped.") }
             $part = $t.Full + ".nspart"
             [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($t.Full))
             $fs = $null; $ok = $false

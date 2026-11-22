@@ -10,8 +10,8 @@ android {
         applicationId 'com.blackout.nightsend'
         minSdk 26
         targetSdk 34
-        versionCode 8
-        versionName '0.8'
+        versionCode 9
+        versionName '0.8.1'
         buildConfigField 'String', 'BUILD_NUMBER', '"' + (System.getenv('GITHUB_RUN_NUMBER') ?: 'dev') + '"'
         buildConfigField 'String', 'GIT_SHA', '"' + (System.getenv('GITHUB_SHA') ?: 'local').take(7) + '"'
     }
