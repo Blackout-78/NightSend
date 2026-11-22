@@ -1257,8 +1257,15 @@ function Start-Receive {
                 Remove-Item -LiteralPath $part -Force -ErrorAction SilentlyContinue
                 Log ("Size check failed, not kept: " + $t.Rel); $failed++; continue
             }
-            if (Test-Path -LiteralPath $t.Full) { Remove-Item -LiteralPath $t.Full -Force }
-            [IO.File]::Move($part, $t.Full)
+            $dest = $t.Full
+            if (Test-Path -LiteralPath $dest) {
+                $dDir = [IO.Path]::GetDirectoryName($dest)
+                $dBase = [IO.Path]::GetFileNameWithoutExtension($dest)
+                $dExt = [IO.Path]::GetExtension($dest)
+                $n = 1
+                do { $dest = Join-Path $dDir ("{0} ({1}){2}" -f $dBase, $n, $dExt); $n++ } while ((Test-Path -LiteralPath $dest) -and $n -lt 10000)
+            }
+            [IO.File]::Move($part, $dest)
             $done++
         }
         $bar.Value = 1000; $lblFile.Text = ""

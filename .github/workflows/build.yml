@@ -75,7 +75,7 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: NightSend 0.8.1 (build ${{ github.run_number }})
+          name: NightSend 0.8.2 (build ${{ github.run_number }})
           body_path: release-body.md
           files: NightSend.apk
 
@@ -106,5 +106,5 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: NightSend 0.8.1 (build ${{ github.run_number }})
+          name: NightSend 0.8.2 (build ${{ github.run_number }})
           files: NightSend.exe
